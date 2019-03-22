@@ -10,14 +10,11 @@ OBJS = cg.o ${COMMON}/c_print_results.o  \
 include ../sys/make.common
 
 ${PROGRAM}: config ${OBJS}
-	${CLINK} ${CLINKFLAGS} -o ${PROGRAM} ${OBJS} ${C_LIB}
+	${CLINK} -o ${PROGRAM} ${OBJS} ${C_LIB} ${CLINKFLAGS}
 
 cg.o:		cg.cpp  npbparams.hpp
 	${CCOMPILE} cg.cpp
 
 clean:
-	- rm -f *.o *~ 
+	- rm -f *.o *~
 	- rm -f npbparams.hpp core
-
-
-

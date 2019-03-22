@@ -13,7 +13,7 @@ OBJS = is.o \
 
 
 ${PROGRAM}: config ${OBJS}
-	${CLINK} ${CLINKFLAGS} -o ${PROGRAM} ${OBJS} ${C_LIB}
+	${CLINK} -o ${PROGRAM} ${OBJS} ${C_LIB} ${CLINKFLAGS}
 
 is.o:             is.cpp  npbparams.hpp
 	${CCOMPILE} is.cpp

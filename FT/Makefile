@@ -10,7 +10,7 @@ OBJS = ft.o ${COMMON}/c_${RAND}.o ${COMMON}/c_print_results.o \
 include ../sys/make.common
 
 ${PROGRAM}: config ${OBJS}
-	${CLINK} ${CLINKFLAGS} -o ${PROGRAM} ${OBJS} ${C_LIB}
+	${CLINK} -o ${PROGRAM} ${OBJS} ${C_LIB} ${CLINKFLAGS} 
 
 ft.o:             ft.cpp  global.hpp npbparams.hpp
 	${CCOMPILE} ft.cpp

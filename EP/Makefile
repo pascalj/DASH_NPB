@@ -10,15 +10,12 @@ OBJS = ep.o ${COMMON}/c_print_results.o ${COMMON}/c_${RAND}.o \
 include ../sys/make.common
 
 ${PROGRAM}: config ${OBJS}
-	${CLINK} ${CLINKFLAGS} -o ${PROGRAM} ${OBJS} ${C_LIB}
+	${CLINK} -o ${PROGRAM} ${OBJS} ${C_LIB} ${CLINKFLAGS} 
 
 
 ep.o:		ep.cpp npbparams.hpp
 	${CCOMPILE} ep.cpp
 
 clean:
-	- rm -f *.o *~ 
+	- rm -f *.o *~
 	- rm -f npbparams.hpp core
-
-
-

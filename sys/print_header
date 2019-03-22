@@ -1,6 +1,6 @@
 echo ''
 echo '   ========================================='
-echo '   =      NAS Parallel Benchmarks 	 ='
+echo '   =      NAS Parallel Benchmarks          ='
 echo '   =      OpenMP C++STL Versions           ='
 echo '   =      Developed by:   Dalvan Griebler  ='
 echo '   =                      Júnior Löff      ='
