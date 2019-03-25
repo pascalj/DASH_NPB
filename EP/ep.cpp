@@ -40,7 +40,6 @@
 #define	S		271828183.0
 #define	TIMERS_ENABLED	FALSE
 
-
 struct ep_res {
 	double sx;
 	double sy;
@@ -65,7 +64,6 @@ int main(int argc, char **argv) {
 
 	double Mops, t1, sx, sy, tm, an, gc;
 	double dum[3] = { 1.0, 1.0, 1.0 };
-	//std::vector<double> dum = { 1.0, 1.0, 1.0 };
 	int np, i, nit, k_offset, j;
 	boolean verified;
 
@@ -152,7 +150,9 @@ int main(int argc, char **argv) {
 
 	dash::Array<int> v(np);
 
-	if( 0 == dash::myid()) std::iota(v.begin(), v.end(), 0);
+	//if( 0 == dash::myid()) std::iota(v.begin(), v.end(), 0);
+
+	std::iota(v.lbegin(), v.lend(), dash::myid() * ceil((double) np / dash::size())); //only works when using blocking pattern
 
 	v.barrier();
 
@@ -209,8 +209,20 @@ int main(int argc, char **argv) {
 	v.barrier();
 
 	if(TIMERS_ENABLED == TRUE) timer_stop(4);
+	
+	ep_res zero;
 
-	if ( 0 == dash::myid() ) {
+	res[0] = dash::reduce(res.begin(), res.end(), zero, [](ep_res a, ep_res b){
+		ep_res c;
+		c.sx = a.sx + b.sx;
+		c.sy = a.sy + b.sy;
+		for (int i = 0; i < NQ; ++i) c.q[i] = a.q[i] + b.q[i];
+		return c;
+	});
+
+	res.barrier();
+
+	if ( 0 == dash::myid() ) {/*
 
 		for( auto i = 1; i < dash::size(); ++i) {
 
@@ -220,7 +232,8 @@ int main(int argc, char **argv) {
 			for(j=0; j < NQ; ++j) {
 				res.local[0].q[j] += ((ep_res) res[i]).q[j];
 			}
-		}
+		}*/
+
 
 
 		for (i = 0; i <= NQ-1; i++) {

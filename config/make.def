@@ -47,7 +47,7 @@ C_INC = -I../common -I/home/nicco/opt/dash-0.4.0/include
 #---------------------------------------------------------------------------
 # Global *compile time* flags for C programs (use -w3 -diag-disable 981 -diag-disable 383)
 #---------------------------------------------------------------------------
-CFLAGS	= -std=c++14
+CFLAGS	= -std=c++14 -O3
 
 #---------------------------------------------------------------------------
 # Global *link time* flags. Flags for increasing maximum executable
