@@ -13,14 +13,11 @@
 
 --------------------------------------------------------------------*/
 
-#include <libdash.h>
-
 #include "npbparams.hpp"
 #include <cstdlib>
 #include <cstdio>
-//#include <omp.h>
+#include <omp.h>
 #include <iostream>
-#include <thread>
 
 
 /*****************************************************************/
@@ -147,15 +144,16 @@ int      passed_verification;
 /* These are the three main arrays. */
 /* See SIZE_OF_BUFFERS def above    */
 /************************************/
-dash::Array<INT_TYPE> key_array;
-dash::Array<INT_TYPE> key_buff1;
-INT_TYPE partial_verify_vals[TEST_ARRAY_SIZE];
-INT_TYPE **key_buff1_aptr = NULL;
+INT_TYPE key_array[SIZE_OF_BUFFERS],
+         key_buff1[MAX_KEY],
+         key_buff2[SIZE_OF_BUFFERS],
+         partial_verify_vals[TEST_ARRAY_SIZE],
+         **key_buff1_aptr = NULL;
 
 #ifdef USE_BUCKETS
-dash::Array<INT_TYPE> bucket_size;
-dash::Array<INT_TYPE> key_buff2;
-INT_TYPE bucket_ptrs[NUM_BUCKETS];
+INT_TYPE **bucket_size,
+         bucket_ptrs[NUM_BUCKETS];
+#pragma omp threadprivate(bucket_ptrs)
 #endif
 
 
@@ -271,6 +269,7 @@ double  timer_read( int n );
 
 static int      KS=0;
 static double	R23, R46, T23, T46;
+#pragma omp threadprivate(KS, R23, R46, T23, T46)
 
 double	randlc( double *X, double *A )
 {
@@ -392,13 +391,15 @@ void	create_seq( double seed, double a )
     double x, s;
     INT_TYPE i, k;
 
+    #pragma omp parallel private(x,s,i,k)
+    {
         INT_TYPE k1, k2;
         double an = a;
         int myid, num_procs;
         INT_TYPE mq;
 
-        myid = dash::myid();
-        num_procs = dash::size();
+        myid = omp_get_thread_num();
+        num_procs = omp_get_num_threads();
 
         mq = (NUM_KEYS + num_procs - 1) / num_procs;
         k1 = mq * myid;
@@ -418,6 +419,7 @@ void	create_seq( double seed, double a )
 
             key_array[i] = k*x;
         }
+    } /*omp parallel*/
 }
 
 
@@ -443,14 +445,18 @@ void alloc_key_buff( void )
     int      num_procs;
 
 
-    num_procs = dash::size();
-
-		key_array.allocate(NUM_KEYS, dash::BLOCKED);
-		key_buff1.allocate(MAX_KEY, dash::BLOCKED);
+    num_procs = omp_get_max_threads();
 
 #ifdef USE_BUCKETS
-		bucket_size.allocate(NUM_BUCKETS*num_procs, dash::BLOCKED);
-		key_buff2.allocate(NUM_KEYS, dash::BLOCKED);
+    bucket_size = (INT_TYPE **)alloc_mem(sizeof(INT_TYPE *) * num_procs);
+
+    for (i = 0; i < num_procs; i++) {
+        bucket_size[i] = (INT_TYPE *)alloc_mem(sizeof(INT_TYPE) * NUM_BUCKETS);
+    }
+
+    #pragma omp parallel for
+    for( i=0; i<NUM_KEYS; i++ )
+        key_buff2[i] = 0;
 
 #else /*USE_BUCKETS*/
 
@@ -573,102 +579,102 @@ void rank( int iteration )
 
     /*  Setup pointers to key buffers  */
 #ifdef USE_BUCKETS
-    //key_buff_ptr2 = key_buff2;
+    key_buff_ptr2 = key_buff2;
 #else
     key_buff_ptr2 = key_array;
 #endif
-    //key_buff_ptr = key_buff1;
+    key_buff_ptr = key_buff1;
 
-		INT_TYPE bucket_ptrs_local[NUM_BUCKETS];
-    int myid = dash::myid();
-    int num_procs = dash::size();
 
-    /*  Bucket sort is known to improve cache performance on some   */
-    /*  cache based systems.  But the actual performance may depend */
-    /*  on cache size, problem size. */
+    #pragma omp parallel private(i, k)
+    {
+        INT_TYPE *work_buff, m, k1, k2;
+        int myid = omp_get_thread_num();
+        int num_procs = omp_get_num_threads();
+
+        /*  Bucket sort is known to improve cache performance on some   */
+        /*  cache based systems.  But the actual performance may depend */
+        /*  on cache size, problem size. */
 #ifdef USE_BUCKETS
 
-    /*  Initialize */
-    for( i=0; i<NUM_BUCKETS; i++ )
-        bucket_size.local[i] = 0;
+        work_buff = bucket_size[myid];
 
-    /*  Determine the number of keys in each bucket */
-		dash::for_each(key_array.begin(), key_array.end(), [shift](int k) {
-			bucket_size.local[k >> shift]++;
-		});
-    key_array.barrier();
+        /*  Initialize */
+        for( i=0; i<NUM_BUCKETS; i++ )
+            work_buff[i] = 0;
 
-    /*  Accumulative bucket sizes are the bucket pointers.
-    These are global sizes accumulated upon to each bucket */
-    bucket_ptrs_local[0] = 0;
-    for( k=0; k< myid; k++ )  {
-        bucket_ptrs_local[0] += bucket_size[k*NUM_BUCKETS];
-    }
+        /*  Determine the number of keys in each bucket */
+        #pragma omp for schedule(static)
+        for( i=0; i<NUM_KEYS; i++ )
+            work_buff[key_array[i] >> shift]++;
 
-    for( i=1; i< NUM_BUCKETS; i++ ) {
-        bucket_ptrs_local[i] = bucket_ptrs_local[i-1];
-        for( k=0; k< myid; k++ )
-            bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
+        /*  Accumulative bucket sizes are the bucket pointers.
+        These are global sizes accumulated upon to each bucket */
+        bucket_ptrs[0] = 0;
+        for( k=0; k< myid; k++ )  {
+            bucket_ptrs[0] += bucket_size[k][0];
+        }
+
+        for( i=1; i< NUM_BUCKETS; i++ ) {
+            bucket_ptrs[i] = bucket_ptrs[i-1];
+            for( k=0; k< myid; k++ )
+                bucket_ptrs[i] += bucket_size[k][i];
             for( k=myid; k< num_procs; k++ )
-                bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i-1];
-    }
-
-		dash::for_each(key_array.begin(), key_array.end(), [&shift, &bucket_ptrs_local](int k) {
-			key_buff2[bucket_ptrs_local[k >> shift]++] = k;
-		});
-		key_array.barrier();
-
-		if (myid < num_procs-1) {
-				for( i=0; i< NUM_BUCKETS; i++ )
-						for( k=myid+1; k< num_procs; k++ )
-								bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
-		}
-
-		if (myid == num_procs-1) {
-			for(int i = 0; i < NUM_BUCKETS; i++)
-				bucket_ptrs[i] = bucket_ptrs_local[i];
-		}
+                bucket_ptrs[i] += bucket_size[k][i-1];
+        }
 
 
-    /*  Now, buckets are sorted.  We only need to sort keys inside
-    each bucket, which can be done in parallel.  Because the distribution
-    of the number of keys in the buckets is Gaussian, the use of
-    a dynamic schedule should improve load balance, thus, performance     */
+        /*  Sort into appropriate bucket */
+        #pragma omp for schedule(static)
+        for( i=0; i<NUM_KEYS; i++ ) {
+            k = key_array[i];
+            key_buff2[bucket_ptrs[k >> shift]++] = k;
 
-		dash::Array<int> v(NUM_BUCKETS);
+        }
+        /*  The bucket pointers now point to the final accumulated sizes */
+        if (myid < num_procs-1) {
+            for( i=0; i< NUM_BUCKETS; i++ )
+                for( k=myid+1; k< num_procs; k++ )
+                    bucket_ptrs[i] += bucket_size[k][i];
+        }
 
-		//if( 0 == dash::myid()) std::iota(v.begin(), v.end(), 0);
 
-		std::iota(v.lbegin(), v.lend(), dash::myid() * ceil((double) NUM_BUCKETS / dash::size())); //only works when using blocking pattern
+        /*  Now, buckets are sorted.  We only need to sort keys inside
+        each bucket, which can be done in parallel.  Because the distribution
+        of the number of keys in the buckets is Gaussian, the use of
+        a dynamic schedule should improve load balance, thus, performance     */
 
-		v.barrier();
+#ifdef SCHED_CYCLIC
+        #pragma omp for schedule(static,1)
+#else
+        #pragma omp for schedule(dynamic)
+#endif
+        for( i=0; i< NUM_BUCKETS; i++ ) {
 
-		dash::for_each(v.begin(), v.end(), [&num_bucket_keys, &bucket_ptrs_local](int i)
-		{
-			/*  Clear the work array section associated with each bucket */
-			INT_TYPE j;
-			INT_TYPE k1 = i * num_bucket_keys;
-			INT_TYPE k2 = k1 + num_bucket_keys;
-			for ( j = k1; j < k2; j++ )
-					key_buff1[j] = 0;
+            /*  Clear the work array section associated with each bucket */
+            k1 = i * num_bucket_keys;
+            k2 = k1 + num_bucket_keys;
+            for ( k = k1; k < k2; k++ )
+                key_buff1[k] = 0;
 
-			/*  Ranking of all keys occurs in this section:                 */
+            /*  Ranking of all keys occurs in this section:                 */
 
-			/*  In this section, the keys themselves are used as their
-			own indexes to determine how many of each there are: their
-			individual population                                       */
-			INT_TYPE m = (i > 0)? bucket_ptrs_local[i-1] : 0;
-			for ( j = m; j < bucket_ptrs_local[i]; j++ )
-					key_buff1[key_buff2[j]]++;  /* Now they have individual key   */
-																			/* population                     */
+            /*  In this section, the keys themselves are used as their
+            own indexes to determine how many of each there are: their
+            individual population                                       */
+            m = (i > 0)? bucket_ptrs[i-1] : 0;
+            for ( k = m; k < bucket_ptrs[i]; k++ )
+                key_buff1[key_buff2[k]]++;  /* Now they have individual key   */
+            /* population                     */
 
-			/*  To obtain ranks of each key, successively add the individual key
-			population, not forgetting to add m, the total of lesser keys,
-			to the first key population                                          */
-			key_buff1[k1] += m;
-			for ( j = k1+1; j < k2; j++ )
-					key_buff1[j] += key_buff1[j-1];
-		});
+            /*  To obtain ranks of each key, successively add the individual key
+            population, not forgetting to add m, the total of lesser keys,
+            to the first key population                                          */
+            key_buff1[k1] += m;
+            for ( k = k1+1; k < k2; k++ )
+                key_buff1[k] += key_buff1[k-1];
+
+        }
 
 #else /*USE_BUCKETS*/
 
@@ -709,118 +715,116 @@ void rank( int iteration )
 
 #endif /*USE_BUCKETS*/
 
+    } /*omp parallel*/
 
     /* This is the partial verify test section */
     /* Observe that test_rank_array vals are   */
     /* shifted differently for different cases */
+    for( i=0; i<TEST_ARRAY_SIZE; i++ )
+    {
+        k = partial_verify_vals[i];          /* test vals were put here */
+        if( 0 < k  &&  k <= NUM_KEYS-1 )
+        {
+            INT_TYPE key_rank = key_buff_ptr[k-1];
+            int failed = 0;
 
-		if(0 == myid) {
+            switch( CLASS )
+            {
+            case 'S':
+                if( i <= 2 ) {
+                    if( key_rank != test_rank_array[i]+iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                } else {
+                    if( key_rank != test_rank_array[i]-iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                }
+                break;
+            case 'W':
+                if( i < 2 ) {
+                    if( key_rank != test_rank_array[i]+(iteration-2) )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                } else {
+                    if( key_rank != test_rank_array[i]-iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                }
+                break;
+            case 'A':
+                if( i <= 2 ) {
+                    if( key_rank != test_rank_array[i]+(iteration-1) )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                } else {
+                    if( key_rank != test_rank_array[i]-(iteration-1) )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                }
+                break;
+            case 'B':
+                if( i == 1 || i == 2 || i == 4 ) {
+                    if( key_rank != test_rank_array[i]+iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                } else {
+                    if( key_rank != test_rank_array[i]-iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                }
+                break;
+            case 'C':
+                if( i <= 2 ) {
+                    if( key_rank != test_rank_array[i]+iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                } else {
+                    if( key_rank != test_rank_array[i]-iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                }
+                break;
+            case 'D':
+                if( i < 2 ) {
+                    if( key_rank != test_rank_array[i]+iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                } else {
+                    if( key_rank != test_rank_array[i]-iteration )
+                        failed = 1;
+                    else
+                        passed_verification++;
+                }
+                break;
+            }
+            if( failed == 1 )
+                printf( "Failed partial verification: "
+                        "iteration %d, test key %d\n",
+                        iteration, (int)i );
+        }
+    }
 
-	    for( i=0; i<TEST_ARRAY_SIZE; i++ )
-	    {
-	        k = partial_verify_vals[i];          // test vals were put here
-	        if( 0 < k  &&  k <= NUM_KEYS-1 )
-	        {
-	            INT_TYPE key_rank = key_buff1[k-1];
-	            int failed = 0;
 
-	            switch( CLASS )
-	            {
-	            case 'S':
-	                if( i <= 2 ) {
-	                    if( key_rank != test_rank_array[i]+iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                } else {
-	                    if( key_rank != test_rank_array[i]-iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                }
-	                break;
-	            case 'W':
-	                if( i < 2 ) {
-	                    if( key_rank != test_rank_array[i]+(iteration-2) )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                } else {
-	                    if( key_rank != test_rank_array[i]-iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                }
-	                break;
-	            case 'A':
-	                if( i <= 2 ) {
-	                    if( key_rank != test_rank_array[i]+(iteration-1) )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                } else {
-	                    if( key_rank != test_rank_array[i]-(iteration-1) )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                }
-	                break;
-	            case 'B':
-	                if( i == 1 || i == 2 || i == 4 ) {
-	                    if( key_rank != test_rank_array[i]+iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                } else {
-	                    if( key_rank != test_rank_array[i]-iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                }
-	                break;
-	            case 'C':
-	                if( i <= 2 ) {
-	                    if( key_rank != test_rank_array[i]+iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                } else {
-	                    if( key_rank != test_rank_array[i]-iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                }
-	                break;
-	            case 'D':
-	                if( i < 2 ) {
-	                    if( key_rank != test_rank_array[i]+iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                } else {
-	                    if( key_rank != test_rank_array[i]-iteration )
-	                        failed = 1;
-	                    else
-	                        passed_verification++;
-	                }
-	                break;
-	            }
-	            if( failed == 1 )
-	                printf( "Failed partial verification: "
-	                        "iteration %d, test key %d\n",
-	                        iteration, (int)i );
-	        }
-	    }
-
-	}
 
 
     /*  Make copies of rank info for use by full_verify: these variables
     in rank are local; making them global slows down the code, probably
     since they cannot be made register by compiler                        */
 
-    //if( iteration == MAX_ITERATIONS )
-        //key_buff_ptr_global = key_buff_ptr;
+    if( iteration == MAX_ITERATIONS )
+        key_buff_ptr_global = key_buff_ptr;
 
 }
 
@@ -831,91 +835,77 @@ void rank( int iteration )
 
 int main( int argc, char **argv )
 {
-		dash::init(&argc, &argv);
-
-    int nthreads=dash::size();
+    int nthreads=1;
     int   i, iteration, timer_on;
     double  timecounter;
 
-		if ( 0 == dash::myid() ) {
-
-    	FILE *fp;
+    FILE *fp;
 
 
-    	/*  Initialize timers  */
-    	timer_on = 0;
-    	if ((fp = fopen("timer.flag", "r")) != NULL) {
-        	fclose(fp);
-        	timer_on = 1;
-    	}
-	    timer_clear( 0 );
-	    if (timer_on) {
-	        timer_clear( 1 );
-	        timer_clear( 2 );
-	        timer_clear( 3 );
-	    }
+    /*  Initialize timers  */
+    timer_on = 0;
+    if ((fp = fopen("timer.flag", "r")) != NULL) {
+        fclose(fp);
+        timer_on = 1;
+    }
+    timer_clear( 0 );
+    if (timer_on) {
+        timer_clear( 1 );
+        timer_clear( 2 );
+        timer_clear( 3 );
+    }
 
-    	if (timer_on) timer_start( 3 );
+    if (timer_on) timer_start( 3 );
 
 
-	    /*  Initialize the verification arrays if a valid class */
-	    for( i=0; i<TEST_ARRAY_SIZE; i++ )
-	        switch( CLASS )
-	        {
-	        case 'S':
-	            test_index_array[i] = S_test_index_array[i];
-	            test_rank_array[i]  = S_test_rank_array[i];
-	            break;
-	        case 'A':
-	            test_index_array[i] = A_test_index_array[i];
-	            test_rank_array[i]  = A_test_rank_array[i];
-	            break;
-	        case 'W':
-	            test_index_array[i] = W_test_index_array[i];
-	            test_rank_array[i]  = W_test_rank_array[i];
-	            break;
-	        case 'B':
-	            test_index_array[i] = B_test_index_array[i];
-	            test_rank_array[i]  = B_test_rank_array[i];
-	            break;
-	        case 'C':
-	            test_index_array[i] = C_test_index_array[i];
-	            test_rank_array[i]  = C_test_rank_array[i];
-	            break;
-	        case 'D':
-	            test_index_array[i] = D_test_index_array[i];
-	            test_rank_array[i]  = D_test_rank_array[i];
-	            break;
-	        };
+    /*  Initialize the verification arrays if a valid class */
+    for( i=0; i<TEST_ARRAY_SIZE; i++ )
+        switch( CLASS )
+        {
+        case 'S':
+            test_index_array[i] = S_test_index_array[i];
+            test_rank_array[i]  = S_test_rank_array[i];
+            break;
+        case 'A':
+            test_index_array[i] = A_test_index_array[i];
+            test_rank_array[i]  = A_test_rank_array[i];
+            break;
+        case 'W':
+            test_index_array[i] = W_test_index_array[i];
+            test_rank_array[i]  = W_test_rank_array[i];
+            break;
+        case 'B':
+            test_index_array[i] = B_test_index_array[i];
+            test_rank_array[i]  = B_test_rank_array[i];
+            break;
+        case 'C':
+            test_index_array[i] = C_test_index_array[i];
+            test_rank_array[i]  = C_test_rank_array[i];
+            break;
+        case 'D':
+            test_index_array[i] = D_test_index_array[i];
+            test_rank_array[i]  = D_test_rank_array[i];
+            break;
+        };
 
 
 
-	    /*  Printout initial NPB info */
-	    printf  ( "\n\n NAS Parallel Benchmarks 4.0 OpenMP C++ version - IS Benchmark\n\n" );
-	    printf("\n\n Developed by: Dalvan Griebler <dalvan.griebler@acad.pucrs.br>\n");
-	    printf( " Size:  %ld  (class %c)\n", (long)TOTAL_KEYS, CLASS );
-	    printf( " Iterations:  %d\n", MAX_ITERATIONS );
-	    printf( " Number of available threads:  %d\n", std::thread::hardware_concurrency() );
-	    printf( "\n" );
+    /*  Printout initial NPB info */
+    printf  ( "\n\n NAS Parallel Benchmarks 4.0 OpenMP C++ version - IS Benchmark\n\n" );
+    printf("\n\n Developed by: Dalvan Griebler <dalvan.griebler@acad.pucrs.br>\n");
+    printf( " Size:  %ld  (class %c)\n", (long)TOTAL_KEYS, CLASS );
+    printf( " Iterations:  %d\n", MAX_ITERATIONS );
+    printf( " Number of available threads:  %d\n", omp_get_max_threads() );
+    printf( "\n" );
 
-			#ifdef USE_BUCKETS
-				printf(" This Version of the Benchmark DOES USE Buckets\n\n");
-			#else
-				printf(" This Version of the Benchmark DOES NOT USE Buckets\n\n");
-			#endif
-
-	    if (timer_on) timer_start( 1 );
-		}
-
-		alloc_key_buff();
+    if (timer_on) timer_start( 1 );
 
     /*  Generate random number sequence and subsequent keys on all procs */
     create_seq( 314159265.00,                    /* Random number gen seed */
                 1220703125.00 );                 /* Random number gen mult */
 
-		if ( 0 == dash::myid() ) {
-    	if (timer_on) timer_stop( 1 );
-		}
+    alloc_key_buff();
+    if (timer_on) timer_stop( 1 );
 
 
     /*  Do one interation for free (i.e., untimed) to guarantee initialization of
@@ -925,73 +915,63 @@ int main( int argc, char **argv )
     /*  Start verification counter */
     passed_verification = 0;
 
-    if (0 == dash::myid()) if( CLASS != 'S' ) printf( "\n   iteration\n" );
+    if( CLASS != 'S' ) printf( "\n   iteration\n" );
 
     /*  Start timer  */
-    if (0 == dash::myid()) timer_start( 0 );
+    timer_start( 0 );
 
 
     /*  This is the main iteration */
     for( iteration=1; iteration<=MAX_ITERATIONS; iteration++ )
     {
-        if (0 == dash::myid()) if( CLASS != 'S' ) printf( "        %d\n", iteration );
+        if( CLASS != 'S' ) printf( "        %d\n", iteration );
         rank( iteration );
     }
 
-		if (0 == dash::myid()) {
 
-	    /*  End of timing, obtain maximum time of all processors */
-	    timer_stop( 0 );
+    /*  End of timing, obtain maximum time of all processors */
+    timer_stop( 0 );
 
-	    timecounter = timer_read( 0 );
-
-
-	    /*  This tests that keys are in sequence: sorting of last ranked key seq
-	    occurs here, but is an untimed operation                             */
-	    if (timer_on) timer_start( 2 );
-		}
-
-	  //full_verify();
-
-		if (0 == dash::myid()) {
-	    if (timer_on) timer_stop( 2 );
-
-	    if (timer_on) timer_stop( 3 );
+    timecounter = timer_read( 0 );
 
 
-	    /*  The final printout  */
-	    if( passed_verification != 5*MAX_ITERATIONS + 1 )
-	        passed_verification = 0;
-	    /*c_print_results( "IS", CLASS, (int)(TOTAL_KEYS/64), 64, 0, MAX_ITERATIONS, timecounter, ((double) (MAX_ITERATIONS*TOTAL_KEYS))
-	    /timecounter/1000000., "keys ranked", passed_verification, NPBVERSION, COMPILETIME, CC, CLINK, C_LIB, C_INC,
-	    CFLAGS, CLINKFLAGS );*/
-	    c_print_results( (char*)"IS", CLASS, TOTAL_KEYS, 0, 0, MAX_ITERATIONS, nthreads, timecounter,
-	                     ((double) (MAX_ITERATIONS*TOTAL_KEYS))/timecounter/1000000.0, (char*)"keys ranked", passed_verification,
-	                     (char*)NPBVERSION, (char*)COMPILETIME, (char*)CC, (char*)CLINK, (char*)C_LIB, (char*)C_INC, (char*)CFLAGS, (char*)CLINKFLAGS, (char*)"randlc");
+    /*  This tests that keys are in sequence: sorting of last ranked key seq
+    occurs here, but is an untimed operation                             */
+    if (timer_on) timer_start( 2 );
+    full_verify();
+    if (timer_on) timer_stop( 2 );
 
-	    /*  Print additional timers  */
-	    if (timer_on) {
-	        double t_total, t_percent;
+    if (timer_on) timer_stop( 3 );
 
-	        t_total = timer_read( 3 );
-	        printf("\nAdditional timers -\n");
-	        printf(" Total execution: %8.3f\n", t_total);
-	        if (t_total == 0.0) t_total = 1.0;
-	        timecounter = timer_read(1);
-	        t_percent = timecounter/t_total * 100.;
-	        printf(" Initialization : %8.3f (%5.2f%%)\n", timecounter, t_percent);
-	        timecounter = timer_read(0);
-	        t_percent = timecounter/t_total * 100.;
-	        printf(" Benchmarking   : %8.3f (%5.2f%%)\n", timecounter, t_percent);
-	        timecounter = timer_read(2);
-	        t_percent = timecounter/t_total * 100.;
-	        printf(" Sorting        : %8.3f (%5.2f%%)\n", timecounter, t_percent);
-	    }
 
-		}
+    /*  The final printout  */
+    if( passed_verification != 5*MAX_ITERATIONS + 1 )
+        passed_verification = 0;
+    /*c_print_results( "IS", CLASS, (int)(TOTAL_KEYS/64), 64, 0, MAX_ITERATIONS, timecounter, ((double) (MAX_ITERATIONS*TOTAL_KEYS))
+    /timecounter/1000000., "keys ranked", passed_verification, NPBVERSION, COMPILETIME, CC, CLINK, C_LIB, C_INC,
+    CFLAGS, CLINKFLAGS );*/
+    c_print_results( (char*)"IS", CLASS, TOTAL_KEYS, 0, 0, MAX_ITERATIONS, nthreads, timecounter,
+                     ((double) (MAX_ITERATIONS*TOTAL_KEYS))/timecounter/1000000.0, (char*)"keys ranked", passed_verification,
+                     (char*)NPBVERSION, (char*)COMPILETIME, (char*)CC, (char*)CLINK, (char*)C_LIB, (char*)C_INC, (char*)CFLAGS, (char*)CLINKFLAGS, (char*)"randlc");
 
-		dash::finalize();
+    /*  Print additional timers  */
+    if (timer_on) {
+        double t_total, t_percent;
 
+        t_total = timer_read( 3 );
+        printf("\nAdditional timers -\n");
+        printf(" Total execution: %8.3f\n", t_total);
+        if (t_total == 0.0) t_total = 1.0;
+        timecounter = timer_read(1);
+        t_percent = timecounter/t_total * 100.;
+        printf(" Initialization : %8.3f (%5.2f%%)\n", timecounter, t_percent);
+        timecounter = timer_read(0);
+        t_percent = timecounter/t_total * 100.;
+        printf(" Benchmarking   : %8.3f (%5.2f%%)\n", timecounter, t_percent);
+        timecounter = timer_read(2);
+        t_percent = timecounter/t_total * 100.;
+        printf(" Sorting        : %8.3f (%5.2f%%)\n", timecounter, t_percent);
+    }
     return 0;
 }
 /**************************/
