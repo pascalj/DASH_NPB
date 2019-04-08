@@ -18,7 +18,6 @@
 #include "npbparams.hpp"
 #include <cstdlib>
 #include <cstdio>
-//#include <omp.h>
 #include <iostream>
 #include <thread>
 
@@ -34,7 +33,7 @@
 /* Example:  SGI O2000:   400% slowdown with buckets (Wow!)      */
 /*****************************************************************/
 /* To disable the use of buckets, comment out the following line */
-#define USE_BUCKETS
+//#define USE_BUCKETS
 
 /* Uncomment below for cyclic schedule */
 /*#define SCHED_CYCLIC*/
@@ -485,33 +484,30 @@ void full_verify( void )
 
     dash::barrier();
 
-    if(0 == dash::myid()) {
-      if(std::is_sorted(key_array.begin(), key_array.end())) printf("Sort successfull\n");
-    }
-
     /*  Confirm keys correctly sorted: count incorrectly sorted keys, if any */
 
-    if(-1 == dash::myid()) for(int i = 0; i < NUM_KEYS; i++) printf("%d ", (int) key_array[i]);
-
     dash::Array<INT_TYPE> faults(dash::size());
+    dash::fill(faults.begin(), faults.end(), 0);
 
-    dash::Array<INT_TYPE> v2(NUM_KEYS);
+    dash::Array<INT_TYPE> v2(NUM_KEYS-1);
 
     //std::iota(v2.lbegin(), v2.lend(), dash::myid() * ceil((double) NUM_KEYS / dash::size())); //only works when using blocking pattern
     if( 0 == dash::myid()) std::iota(v2.begin(), v2.end(), 1);
 
 		v2.barrier();
 
-		dash::for_each(v2.begin(), v2.end(), [&j, &faults](INT_TYPE i)
+		dash::for_each(v2.begin(), v2.end(), [&faults, &v2](INT_TYPE i)
 		{
-        if( key_array[i-1] > key_array[i] )
+        if( key_array[i-1] > key_array[i] ){
+          printf("Fault at %d of %d\n", i, (int) v2[NUM_KEYS-1]);
             faults.local[0]++;
+          }
     });
 
     dash::barrier();
 
-    if(0 == dash::myid()) {
 
+    if(0 == dash::myid()) {
       for(int i = 1; i < dash::size(); i++) faults[0] += faults[i];
 
       if( faults[0] != 0 )
