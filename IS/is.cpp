@@ -137,10 +137,7 @@ typedef  int  INT_TYPE;
 /********************/
 /* Some global info */
 /********************/
-INT_TYPE *key_buff_ptr_global;         /* used by full_verify to get */
-/* copies of rank info        */
-
-int      passed_verification;
+int passed_verification;
 
 
 /************************************/
@@ -149,12 +146,11 @@ int      passed_verification;
 /************************************/
 dash::Array<INT_TYPE> key_array;
 dash::Array<INT_TYPE> key_buff1;
+dash::Array<INT_TYPE> key_buff2;
 INT_TYPE partial_verify_vals[TEST_ARRAY_SIZE];
-INT_TYPE **key_buff1_aptr = NULL;
 
 #ifdef USE_BUCKETS
 dash::Array<INT_TYPE> bucket_size;
-dash::Array<INT_TYPE> key_buff2;
 INT_TYPE bucket_ptrs[NUM_BUCKETS];
 #endif
 
@@ -447,19 +443,11 @@ void alloc_key_buff( void )
 
 		key_array.allocate(NUM_KEYS, dash::BLOCKED);
 		key_buff1.allocate(MAX_KEY, dash::BLOCKED);
-
-#ifdef USE_BUCKETS
-		bucket_size.allocate(NUM_BUCKETS*num_procs, dash::BLOCKED);
 		key_buff2.allocate(NUM_KEYS, dash::BLOCKED);
 
-#else /*USE_BUCKETS*/
+#ifdef USE_BUCKETS
 
-    key_buff1_aptr = (INT_TYPE **)alloc_mem(sizeof(INT_TYPE *) * num_procs);
-
-    key_buff1_aptr[0] = key_buff1;
-    for (i = 1; i < num_procs; i++) {
-        key_buff1_aptr[i] = (INT_TYPE *)alloc_mem(sizeof(INT_TYPE) * MAX_KEY);
-    }
+		bucket_size.allocate(NUM_BUCKETS*num_procs, dash::BLOCKED);
 
 #endif /*USE_BUCKETS*/
 }
@@ -473,72 +461,64 @@ void alloc_key_buff( void )
 
 void full_verify( void )
 {
-    INT_TYPE   i, j;
-    INT_TYPE   k, k1;
-
-
     /*  Now, finally, sort the keys:  */
 
     /*  Copy keys into work array; keys in key_array will be reassigned. */
 
-#ifdef USE_BUCKETS
+    std::copy(key_array.lbegin(), key_array.lend(), key_buff2.lbegin());
 
-    /* Buckets are already sorted.  Sorting keys within each bucket */
-#ifdef SCHED_CYCLIC
-    #pragma omp parallel for private(i,j,k,k1) schedule(static,1)
-#else
-    #pragma omp parallel for private(i,j,k,k1) schedule(dynamic)
-#endif
-    for( j=0; j< NUM_BUCKETS; j++ ) {
+    key_array.barrier();
 
-        k1 = (j > 0)? bucket_ptrs[j-1] : 0;
-        for ( i = k1; i < bucket_ptrs[j]; i++ ) {
-            k = --key_buff_ptr_global[key_buff2[i]];
-            key_array[k] = key_buff2[i];
-        }
-    }
+    /* This is actual sorting. Each thread is responsible for
+    a subset of key values */
+    INT_TYPE j = dash::size();
+    j = (MAX_KEY + j - 1) / j;
+    INT_TYPE k1 = j * dash::myid();
+    INT_TYPE k2 = k1 + j;
+    if (k2 > MAX_KEY) k2 = MAX_KEY;
 
-#else
-
-    #pragma omp parallel private(i,j,k,k1)
-    {
-        #pragma omp for
-        for( i=0; i<NUM_KEYS; i++ )
-            key_buff2[i] = key_array[i];
-
-        /* This is actual sorting. Each thread is responsible for
-        a subset of key values */
-        j = omp_get_num_threads();
-        j = (MAX_KEY + j - 1) / j;
-        k1 = j * omp_get_thread_num();
-        INT_TYPE k2 = k1 + j;
-        if (k2 > MAX_KEY) k2 = MAX_KEY;
-
-        for( i=0; i<NUM_KEYS; i++ ) {
-            if (key_buff2[i] >= k1 && key_buff2[i] < k2) {
-                k = --key_buff_ptr_global[key_buff2[i]];
-                key_array[k] = key_buff2[i];
+    std::for_each(key_buff2.begin(), key_buff2.end(), [k1, k2](INT_TYPE i) {
+            if (i >= k1 && i < k2) {
+                key_array[--key_buff1[i]] = i;
             }
-        }
-    } /*omp parallel*/
+        });
 
-#endif
+    dash::barrier();
 
+    if(0 == dash::myid()) {
+      if(std::is_sorted(key_array.begin(), key_array.end())) printf("Sort successfull\n");
+    }
 
     /*  Confirm keys correctly sorted: count incorrectly sorted keys, if any */
 
-    j = 0;
-    #pragma omp parallel for reduction(+:j)
-    for( i=1; i<NUM_KEYS; i++ ) {
+    if(-1 == dash::myid()) for(int i = 0; i < NUM_KEYS; i++) printf("%d ", (int) key_array[i]);
+
+    dash::Array<INT_TYPE> faults(dash::size());
+
+    dash::Array<INT_TYPE> v2(NUM_KEYS);
+
+    //std::iota(v2.lbegin(), v2.lend(), dash::myid() * ceil((double) NUM_KEYS / dash::size())); //only works when using blocking pattern
+    if( 0 == dash::myid()) std::iota(v2.begin(), v2.end(), 1);
+
+		v2.barrier();
+
+		dash::for_each(v2.begin(), v2.end(), [&j, &faults](INT_TYPE i)
+		{
         if( key_array[i-1] > key_array[i] )
-            j++;
+            faults.local[0]++;
+    });
+
+    dash::barrier();
+
+    if(0 == dash::myid()) {
+
+      for(int i = 1; i < dash::size(); i++) faults[0] += faults[i];
+
+      if( faults[0] != 0 )
+          printf( "Full_verify: number of keys out of sort: %ld\n", (long) faults[0] );
+          else
+          passed_verification++;
     }
-
-    if( j != 0 )
-        printf( "Full_verify: number of keys out of sort: %ld\n", (long)j );
-    else
-        passed_verification++;
-
 }
 
 
@@ -552,14 +532,12 @@ void full_verify( void )
 void rank( int iteration )
 {
 
-    INT_TYPE    i, k;
-    INT_TYPE    *key_buff_ptr, *key_buff_ptr2;
+  INT_TYPE    i, k;
 
 #ifdef USE_BUCKETS
     int shift = MAX_KEY_LOG_2 - NUM_BUCKETS_LOG_2;
     INT_TYPE num_bucket_keys = (1L << shift);
 #endif
-
 
     key_array[iteration] = iteration;
     key_array[iteration+MAX_ITERATIONS] = MAX_KEY - iteration;
@@ -568,18 +546,9 @@ void rank( int iteration )
     /*  Determine where the partial verify test keys are, load into  */
     /*  top of array bucket_size                                     */
     for( i=0; i<TEST_ARRAY_SIZE; i++ )
-        partial_verify_vals[i] = key_array[test_index_array[i]];
+      partial_verify_vals[i] = key_array[test_index_array[i]];
 
 
-    /*  Setup pointers to key buffers  */
-#ifdef USE_BUCKETS
-    //key_buff_ptr2 = key_buff2;
-#else
-    key_buff_ptr2 = key_array;
-#endif
-    //key_buff_ptr = key_buff1;
-
-		INT_TYPE bucket_ptrs_local[NUM_BUCKETS];
     int myid = dash::myid();
     int num_procs = dash::size();
 
@@ -588,46 +557,43 @@ void rank( int iteration )
     /*  on cache size, problem size. */
 #ifdef USE_BUCKETS
 
+    INT_TYPE bucket_ptrs_local[NUM_BUCKETS];
+
     /*  Initialize */
     for( i=0; i<NUM_BUCKETS; i++ )
-        bucket_size.local[i] = 0;
+      bucket_size.local[i] = 0;
 
     /*  Determine the number of keys in each bucket */
-		dash::for_each(key_array.begin(), key_array.end(), [shift](int k) {
-			bucket_size.local[k >> shift]++;
-		});
+  	dash::for_each(key_array.begin(), key_array.end(), [shift](int k) {
+  		bucket_size.local[k >> shift]++;
+  	});
     key_array.barrier();
 
     /*  Accumulative bucket sizes are the bucket pointers.
     These are global sizes accumulated upon to each bucket */
     bucket_ptrs_local[0] = 0;
     for( k=0; k< myid; k++ )  {
-        bucket_ptrs_local[0] += bucket_size[k*NUM_BUCKETS];
+      bucket_ptrs_local[0] += bucket_size[k*NUM_BUCKETS];
     }
 
     for( i=1; i< NUM_BUCKETS; i++ ) {
-        bucket_ptrs_local[i] = bucket_ptrs_local[i-1];
-        for( k=0; k< myid; k++ )
-            bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
-            for( k=myid; k< num_procs; k++ )
-                bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i-1];
+      bucket_ptrs_local[i] = bucket_ptrs_local[i-1];
+      for( k=0; k< myid; k++ )
+        bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
+        for( k=myid; k< num_procs; k++ )
+          bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i-1];
     }
 
-		dash::for_each(key_array.begin(), key_array.end(), [&shift, &bucket_ptrs_local](int k) {
-			key_buff2[bucket_ptrs_local[k >> shift]++] = k;
-		});
-		key_array.barrier();
+  	dash::for_each(key_array.begin(), key_array.end(), [&shift, &bucket_ptrs_local](int k) {
+  		key_buff2[bucket_ptrs_local[k >> shift]++] = k;
+  	});
+  	key_array.barrier();
 
-		if (myid < num_procs-1) {
-				for( i=0; i< NUM_BUCKETS; i++ )
-						for( k=myid+1; k< num_procs; k++ )
-								bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
-		}
-
-		if (myid == num_procs-1) {
-			for(int i = 0; i < NUM_BUCKETS; i++)
-				bucket_ptrs[i] = bucket_ptrs_local[i];
-		}
+  	if (myid < num_procs-1) {
+  		for( i=0; i< NUM_BUCKETS; i++ )
+  			for( k=myid+1; k< num_procs; k++ )
+  				bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
+  	}
 
 
     /*  Now, buckets are sorted.  We only need to sort keys inside
@@ -635,77 +601,86 @@ void rank( int iteration )
     of the number of keys in the buckets is Gaussian, the use of
     a dynamic schedule should improve load balance, thus, performance     */
 
-		dash::Array<int> v(NUM_BUCKETS);
+  	dash::Array<int> v(NUM_BUCKETS);
 
-		//if( 0 == dash::myid()) std::iota(v.begin(), v.end(), 0);
+  	//if( 0 == dash::myid()) std::iota(v.begin(), v.end(), 0);
 
-		std::iota(v.lbegin(), v.lend(), dash::myid() * ceil((double) NUM_BUCKETS / dash::size())); //only works when using blocking pattern
+  	std::iota(v.lbegin(), v.lend(), dash::myid() * ceil((double) NUM_BUCKETS / dash::size())); //only works when using blocking pattern
 
-		v.barrier();
+  	v.barrier();
 
-		dash::for_each(v.begin(), v.end(), [&num_bucket_keys, &bucket_ptrs_local](int i)
-		{
-			/*  Clear the work array section associated with each bucket */
-			INT_TYPE j;
-			INT_TYPE k1 = i * num_bucket_keys;
-			INT_TYPE k2 = k1 + num_bucket_keys;
-			for ( j = k1; j < k2; j++ )
-					key_buff1[j] = 0;
+  	dash::for_each(v.begin(), v.end(), [&num_bucket_keys, &bucket_ptrs_local](int i)	{
 
-			/*  Ranking of all keys occurs in this section:                 */
+  		/*  Clear the work array section associated with each bucket */
+  		INT_TYPE j;
+  		INT_TYPE k1 = i * num_bucket_keys;
+  		INT_TYPE k2 = k1 + num_bucket_keys;
+  		for ( j = k1; j < k2; j++ )
+  			key_buff1[j] = 0;
 
-			/*  In this section, the keys themselves are used as their
-			own indexes to determine how many of each there are: their
-			individual population                                       */
-			INT_TYPE m = (i > 0)? bucket_ptrs_local[i-1] : 0;
-			for ( j = m; j < bucket_ptrs_local[i]; j++ )
-					key_buff1[key_buff2[j]]++;  /* Now they have individual key   */
-																			/* population                     */
+  		/*  Ranking of all keys occurs in this section:                 */
 
-			/*  To obtain ranks of each key, successively add the individual key
-			population, not forgetting to add m, the total of lesser keys,
-			to the first key population                                          */
-			key_buff1[k1] += m;
-			for ( j = k1+1; j < k2; j++ )
-					key_buff1[j] += key_buff1[j-1];
-		});
+  		/*  In this section, the keys themselves are used as their
+  		own indexes to determine how many of each there are: their
+  		individual population                                       */
+  		INT_TYPE m = (i > 0)? bucket_ptrs_local[i-1] : 0;
+  		for ( j = m; j < bucket_ptrs_local[i]; j++ )
+  			key_buff1[key_buff2[j]]++;  /* Now they have individual key   */
+  																			/* population                     */
+
+  			/*  To obtain ranks of each key, successively add the individual key
+  			population, not forgetting to add m, the total of lesser keys,
+  			to the first key population                                          */
+  			key_buff1[k1] += m;
+  			for ( j = k1+1; j < k2; j++ )
+  				key_buff1[j] += key_buff1[j-1];
+  		});
 
 #else /*USE_BUCKETS*/
 
+    using glob_ptr_t = dash::GlobMemAllocPtr<INT_TYPE>;
 
-        work_buff = key_buff1_aptr[myid];
+    dash::Array<glob_ptr_t> work_buffers(num_procs, dash::CYCLIC);
+
+    work_buffers[myid] = dash::memalloc<INT_TYPE>(MAX_KEY);
+
+    glob_ptr_t gptr = work_buffers[myid];
+    INT_TYPE * work_buf = static_cast<INT_TYPE *>(gptr);
+
+    dash::barrier();
+
+    // compute the histogram for the local keys
+    for(int i=0; i<key_array.lsize(); i++) {
+        work_buf[ key_array.local[i] ]++;
+      }
+
+    // turn it into a cumulative histogram
+    for(int i=0; i<MAX_KEY-1; i++ ) {
+      work_buf[i+1] += work_buf[i];
+    }
 
 
-        /*  Clear the work array */
-        for( i=0; i<MAX_KEY; i++ )
-            work_buff[i] = 0;
+    // compute the offset of this unit's local part in
+    // the global key_buff1 array
+    auto& pat = key_buff1.pattern();
+    int goffs = pat.global(0);
 
+    dash::barrier();
 
-        /*  Ranking of all keys occurs in this section:                 */
+    for(int i=0; i<key_buff1.lsize(); i++ ) {
+      key_buff1.local[i] = work_buf[goffs+i];
+    }
 
-        /*  In this section, the keys themselves are used as their
-        own indexes to determine how many of each there are: their
-        individual population                                       */
+    dash::barrier();
 
-        #pragma omp for nowait schedule(static)
-        for( i=0; i<NUM_KEYS; i++ )
-            work_buff[key_buff_ptr2[i]]++;  /* Now they have individual key   */
-        /* population                     */
+    for(int unit=1; unit<num_procs; unit++ ) {
+      glob_ptr_t remote = work_buffers[(myid+unit)%num_procs];
+      for(int i=0; i<key_buff1.lsize(); i++ ) {
+        key_buff1.local[i] += remote[goffs+i];
+      }
+    }
 
-        /*  To obtain ranks of each key, successively add the individual key
-        population                                          */
-
-        for( i=0; i<MAX_KEY-1; i++ )
-            work_buff[i+1] += work_buff[i];
-
-        #pragma omp barrier
-
-        /*  Accumulate the global key population */
-        for( k=1; k<num_procs; k++ ) {
-            #pragma omp for nowait schedule(static)
-            for( i=0; i<MAX_KEY; i++ )
-                key_buff_ptr[i] += key_buff1_aptr[k][i];
-        }
+    dash::barrier();
 
 #endif /*USE_BUCKETS*/
 
@@ -811,16 +786,7 @@ void rank( int iteration )
 	                        iteration, (int)i );
 	        }
 	    }
-
 	}
-
-
-    /*  Make copies of rank info for use by full_verify: these variables
-    in rank are local; making them global slows down the code, probably
-    since they cannot be made register by compiler                        */
-
-    //if( iteration == MAX_ITERATIONS )
-        //key_buff_ptr_global = key_buff_ptr;
 
 }
 
@@ -920,7 +886,7 @@ int main( int argc, char **argv )
 
     /*  Do one interation for free (i.e., untimed) to guarantee initialization of
     all data and code pages and respective tables */
-    rank( 1 );
+    //rank( 1 );
 
     /*  Start verification counter */
     passed_verification = 0;
@@ -929,7 +895,6 @@ int main( int argc, char **argv )
 
     /*  Start timer  */
     if (0 == dash::myid()) timer_start( 0 );
-
 
     /*  This is the main iteration */
     for( iteration=1; iteration<=MAX_ITERATIONS; iteration++ )
@@ -951,13 +916,12 @@ int main( int argc, char **argv )
 	    if (timer_on) timer_start( 2 );
 		}
 
-	  //full_verify();
+	  full_verify();
 
 		if (0 == dash::myid()) {
 	    if (timer_on) timer_stop( 2 );
 
 	    if (timer_on) timer_stop( 3 );
-
 
 	    /*  The final printout  */
 	    if( passed_verification != 5*MAX_ITERATIONS + 1 )
