@@ -678,6 +678,7 @@ void rank( int iteration )
 
     dash::barrier();
 
+    //dash::memfree<INT_TYPE>(work_buffers[myid], MAX_KEY);
 #endif /*USE_BUCKETS*/
 
 
