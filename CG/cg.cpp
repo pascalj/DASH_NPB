@@ -191,12 +191,9 @@ int main(int argc, char **argv)
 		c  set starting vector to (1, 1, .... 1)
 		c-------------------------------------------------------------------*/
 
-		for (i = 1; i <= NA+1; i++) {
+		for (i = 1; i <= NA; i++) {
 			x[i] = 1.0;
 		}
-
-		x[0]=0;
-		z[0]=0;
 
 	}
 	dash::barrier();
@@ -209,7 +206,7 @@ int main(int argc, char **argv)
 	c---->                    (then reinit, start timing, to niter its)
 	c-------------------------------------------------------------------*/
 
-	for (it = 1; it <= -1; it++) {
+	for (it = 1; it <= 1; it++) {
 
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
@@ -235,11 +232,10 @@ int main(int argc, char **argv)
 		dash::Array<double> norm_temp12(dash::size());
 
 		for( auto it1 = z.lbegin(); it1 != z.lend(); ++it1) {
-			norm_temp11.local[0] += *it1 * *it1;
+			norm_temp12.local[0] += *it1 * *it1;
 		}
 
 		norm_temp12.local[0] = dash::reduce(norm_temp12.begin(), norm_temp12.end(), 0.0, std::plus<double>());
-
 
 		norm_temp12.local[0] = 1.0 / sqrt( norm_temp12.local[0] );
 
@@ -260,7 +256,7 @@ int main(int argc, char **argv)
 	c-------------------------------------------------------------------*/
 	if (0 == dash::myid()) {
 
-		for (i = 1; i <= NA+1; i++) {
+		for (i = 1; i <= NA; i++) {
 			x[i] = 1.0;
 		}
 
@@ -286,13 +282,12 @@ int main(int argc, char **argv)
 	c-------------------------------------------------------------------*/
 
 
-	for (it = 1; it <= -1; it++) {
+	for (it = 1; it <= NITER; it++) {
 
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
 		c-------------------------------------------------------------------*/
 		conj_grad(colidx, rowstr, x, z, a, p, q, r, w, &rnorm);
-
 		/*--------------------------------------------------------------------
 		c  zeta = shift + 1/(x.z)
 		c  So, first: (x.z)
@@ -302,24 +297,39 @@ int main(int argc, char **argv)
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-		//norm_temp11 = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol+2], &z[1], 0.0);
-		//norm_temp12 = std::transform_reduce(pstl::execution::par, &z[1], &z[lastcol-firstcol+2], &z[1], 0.0);
+		dash::Array<double> norm_temp11(dash::size());
+
+		auto it2 = z.lbegin();
+		for( auto it1 = x.lbegin(); it1 != x.lend(); ++it1) {
+			norm_temp11.local[0] += *it1 * *it2;
+			it2++;
+		}
+
+		norm_temp11.local[0] = dash::reduce(norm_temp11.begin(), norm_temp11.end(), 0.0, std::plus<double>());
+
+		dash::Array<double> norm_temp12(dash::size());
+
+		for( auto it1 = z.lbegin(); it1 != z.lend(); ++it1) {
+			norm_temp12.local[0] += *it1 * *it1;
+		}
+
+		norm_temp12.local[0] = dash::reduce(norm_temp12.begin(), norm_temp12.end(), 0.0, std::plus<double>());
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
+		norm_temp12.local[0] = 1.0 / sqrt( norm_temp12.local[0] );
 
-		norm_temp12 = 1.0 / sqrt( norm_temp12 );
+		if(0 == dash::myid()) {
 
-		zeta = SHIFT + 1.0 / norm_temp11;
+			zeta = SHIFT + 1.0 / norm_temp11.local[0];
 
+			if( it == 1 ) {
+				printf("   iteration           ||r||                 zeta\n");
+			}
 
+			printf("    %5d       %20.14e%20.13e\n", it, rnorm, zeta);
 
-		if( it == 1 ) {
-			printf("   iteration           ||r||                 zeta\n");
 		}
-
-		printf("    %5d       %20.14e%20.13e\n", it, rnorm, zeta);
-
 
 		/*--------------------------------------------------------------------
 		c  Normalize z to obtain x
@@ -327,7 +337,11 @@ int main(int argc, char **argv)
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-		//std::transform(pstl::execution::par, &z[1], &z[lastcol-firstcol + 2], &x[1], [norm_temp12](double z) -> double {return norm_temp12*z;});
+		it2 = z.lbegin();
+		for( auto it1 = x.lbegin(); it1 != x.lend(); ++it1) {
+			*it1 = *it2 * norm_temp12.local[0];
+			it2++;
+		}
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
@@ -403,38 +417,48 @@ c  CG algorithm
 c---------------------------------------------------------------------*/
 {
 	//static double d, sum, rho, rho0, alpha, beta;
-	double d, sum, rho, rho0, alpha, beta;
+	//double d, sum, rho, rho0, alpha, beta;
+	dash::Array<double> d(dash::size());
+	dash::Array<double> sum(dash::size());
+	dash::Array<double> rho(dash::size());
+	dash::Array<double> rho0(dash::size());
+	dash::Array<double> alpha(dash::size());
+	dash::Array<double> beta(dash::size());
 	int j;
 	int cgit, cgitmax = 25;
 
 
-	rho = 0.0;
+	rho.local[0] = 0.0;
 
 	/*--------------------------------------------------------------------
 	c  Initialize the CG algorithm:
 	c-------------------------------------------------------------------*/
 
-	if(TIMER_ENABLED == TRUE) timer_start(2);
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-	//std::fill(pstl::execution::par, &q[1], &q[naa + 2], 0.0);
-	//std::fill(pstl::execution::par, &z[1], &z[naa + 2], 0.0);
-	//std::fill(pstl::execution::par, &w[1], &w[naa + 2], 0.0);
+	dash::fill(q.begin(), q.end(), 0.0);
+	dash::fill(z.begin(), z.end(), 0.0);
+	dash::fill(w.begin(), w.end(), 0.0);
 
-	//std::copy(pstl::execution::par, &x[1], &x[naa + 2], &r[1]);
-	//std::copy(pstl::execution::par, &r[1], &r[naa + 2], &p[1]);
+	std::copy(x.lbegin(), x.lend(), r.lbegin());
+	std::copy(r.lbegin(), r.lend(), p.lbegin());
 
-	if(TIMER_ENABLED == TRUE) timer_stop(2);
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
 	/*--------------------------------------------------------------------
 	c  rho = r.r
 	c  Now, obtain the norm of r: First, sum squares of r elements locally...
 	c-------------------------------------------------------------------*/
 
-	if(TIMER_ENABLED == TRUE) timer_start(2);
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-	//rho = std::transform_reduce(pstl::execution::par, &r[1], &r[lastcol-firstcol+2], &r[1], 0.0);
+	for( auto it1 = r.lbegin(); it1 != r.lend(); it1++) {
+		rho.local[0] = rho.local[0] +  *it1 * *it1;
+	}
 
-	if(TIMER_ENABLED == TRUE) timer_stop(2);
+	rho.local[0] = dash::reduce(rho.begin(), rho.end(), 0.0, std::plus<double>());
+
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
 	/*--------------------------------------------------------------------
 	c---->
@@ -442,18 +466,20 @@ c---------------------------------------------------------------------*/
 	c---->
 	c-------------------------------------------------------------------*/
 
-	if(TIMER_ENABLED == TRUE) timer_start(2);
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-	int v[lastrow-firstrow+1];
-	//std::iota(&v[0], &v[lastrow-firstrow+1], 1);
+	dash::Array<int> v(lastrow-firstrow+1);
 
-	if(TIMER_ENABLED == TRUE) timer_stop(2);
+	if(0 == dash::myid()) std::iota(v.begin(), v.end(), 1);
+	dash::barrier();
+
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
 	for (cgit = 1; cgit <= cgitmax; cgit++) {
 
-		rho0 = rho;
-		d = 0.0;
-		rho = 0.0;
+		rho0.local[0] = rho.local[0];
+		d.local[0] = 0.0;
+		rho.local[0] = 0.0;
 
 
 		/*--------------------------------------------------------------------
@@ -471,16 +497,16 @@ c---------------------------------------------------------------------*/
 
 		/* rolled version */
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		/*
-		std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &p, &colidx, &w](int j)
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+
+		dash::for_each(v.begin(), v.end(), [&rowstr, &a, &p, &colidx, &w](int j)
 		{
 			double sum = 0.0;
 			for (int k = rowstr[j]; k < rowstr[j+1]; k++) {
 				sum = sum + a[k]*p[colidx[k]];
 			}
 			w[j] = sum;
-		});*/
+		});
 
 		/*
 		//unrolled-by-two version
@@ -525,30 +551,38 @@ c---------------------------------------------------------------------*/
 		});
 		*/
 
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::copy(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], &q[1]);
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+		std::copy(w.lbegin(), w.lend(), q.lbegin());
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Clear w for reuse...
 		c-------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::fill(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], 0.0);
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+		dash::fill(w.begin(), w.end(), 0.0);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain p.q
 		c-------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//d = std::transform_reduce(pstl::execution::par, &p[1], &p[lastcol-firstcol+2], &q[1], 0.0);
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+
+		auto it2 = p.lbegin();
+		for( auto it1 = q.lbegin(); it1 != q.lend(); ++it1) {
+			d.local[0] += *it1 * *it2;
+			it2++;
+		}
+
+		d.local[0] = dash::reduce(d.begin(), d.end(), 0.0, std::plus<double>());
+
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain alpha = rho / (p.q)
 		c-------------------------------------------------------------------*/
 
-		alpha = rho0 / d;
+		alpha.local[0] = rho0.local[0] / d.local[0];
 
 		/*--------------------------------------------------------------------
 		c  Save a temporary of rho
@@ -560,31 +594,55 @@ c---------------------------------------------------------------------*/
 		c  and    r = r - alpha*q
 		c---------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::transform(pstl::execution::par, &p[1], &p[lastcol-firstcol + 2], &z[1], &z[1], [alpha](double p, double z) -> double {return z + alpha*p;});
-		//std::transform(pstl::execution::par, &q[1], &q[lastcol-firstcol + 2], &r[1], &r[1], [alpha](double q, double r) -> double {return r - alpha*q;});
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+
+		it2 = p.lbegin();
+		for( auto it1 = z.lbegin(); it1 != z.lend(); ++it1) {
+			*it1 = *it1 + alpha.local[0]* *it2;
+			it2++;
+		}
+
+		it2 = q.lbegin();
+		for( auto it1 = r.lbegin(); it1 != r.lend(); ++it1) {
+			*it1 = *it1 - alpha.local[0]* *it2;
+			it2++;
+		}
+
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*---------------------------------------------------------------------
 		c  rho = r.r
 		c  Now, obtain the norm of r: First, sum squares of r elements locally...
 		c---------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//rho = std::transform_reduce(pstl::execution::par, &r[1], &r[lastcol-firstcol+2], &r[1], 0.0);
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+
+		for( auto it1 = r.lbegin(); it1 != r.lend(); ++it1) {
+			rho.local[0] += *it1 * *it1;
+		}
+
+		rho.local[0] = dash::reduce(rho.begin(), rho.end(), 0.0, std::plus<double>());
+
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain beta:
 		c-------------------------------------------------------------------*/
 
-		beta = rho / rho0;
+		beta.local[0] = rho.local[0] / rho0.local[0];
 
 		/*--------------------------------------------------------------------
 		c  p = r + beta*p
 		c-------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::transform(pstl::execution::par, &p[1], &p[lastcol-firstcol + 2], &r[1], &p[1], [beta](double p, double r) -> double {return r + beta*p;});
-		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+
+		it2 = r.lbegin();
+		for( auto it1 = p.lbegin(); it1 != p.lend(); ++it1) {
+			*it1 = *it2 + beta.local[0]* *it1;
+			it2++;
+		}
+		dash::barrier();
+
+		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 	} /* end of do cgit=1,cgitmax */
 
 	/*---------------------------------------------------------------------
@@ -593,30 +651,39 @@ c---------------------------------------------------------------------*/
 	c  The partition submatrix-vector multiply
 	c---------------------------------------------------------------------*/
 
-	sum = 0.0;
-	if(TIMER_ENABLED == TRUE) timer_start(2);/*
-	std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &z, &colidx, &w](int j)
+	sum.local[0] = 0.0;
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+
+	dash::for_each(v.begin(), v.end(), [&rowstr, &a, &z, &colidx, &w](int j)
 	{
 		double d = 0.0;
 		for (int k = rowstr[j]; k <= rowstr[j+1]-1; k++) {
 			d = d + a[k]*z[colidx[k]];
 		}
 		w[j] = d;
-	});*/
-	if(TIMER_ENABLED == TRUE) timer_stop(2);
+	});
 
-	if(TIMER_ENABLED == TRUE) timer_start(2);
-	//std::copy(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], &r[1]);
-	if(TIMER_ENABLED == TRUE) timer_stop(2);
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
+
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
+	std::copy(w.lbegin(), w.lend(), r.lbegin());
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 	/*--------------------------------------------------------------------
 	c  At this point, r contains A.z
 	c-------------------------------------------------------------------*/
-	if(TIMER_ENABLED == TRUE) timer_start(2);
-	//sum = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol + 2], &r[1], 0.0, std::plus<double>(), [](double x1, double x2) -> double {return (x1-x2)*(x1-x2);});
-	if(TIMER_ENABLED == TRUE) timer_stop(2);
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-	(*rnorm) = sqrt(sum);
+	auto it2 = r.lbegin();
+	for( auto it1 = x.lbegin(); it1 != x.lend(); ++it1) {
+		sum.local[0] += (*it1 - *it2)*(*it1 - *it2);
+		it2++;
+	}
 
+	sum.local[0] = dash::reduce(sum.begin(), sum.end(), 0.0, std::plus<double>());
+	
+	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
+
+	(*rnorm) = sqrt(sum.local[0]);
 }
 
 /*---------------------------------------------------------------------
