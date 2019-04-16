@@ -9,7 +9,7 @@
 
 	STL version:
 	Nicco Mietzsch <nicco.mietzsch@campus.lmu.de>
-
+	
 	CPP and OpenMP version:
 			Dalvan Griebler <dalvangriebler@gmail.com>
 			Júnior Löff <loffjh@gmail.com>
@@ -18,7 +18,7 @@
 
 /*
 c---------------------------------------------------------------------
-c  Note: please observe that in the routine conj_grad three
+c  Note: please observe that in the routine conj_grad three 
 c  implementations of the sparse matrix-vector multiply have
 c  been supplied.  The default matrix-vector multiply is not
 c  loop unrolled.  The alternate implementations are unrolled
@@ -28,11 +28,20 @@ c  architecture.  If reporting timing results, any of these three may
 c  be used without penalty.
 c---------------------------------------------------------------------
 */
-#include <libdash.h>
+#include "pstl/execution"
+#include "pstl/algorithm"
+#include "pstl/numeric"
+
+#include <vector>
+#include <numeric>
+#include <tbb/task_scheduler_init.h>
+#include <mutex>
 
 #include <iostream>
 #include "npbparams.hpp"
 #include "npb-CPP.hpp"
+
+//#include "../common/mystl.h"
 
 #define	NZ	NA*(NONZER+1)*(NONZER+1)+NA*(NONZER+2)
 
@@ -53,9 +62,9 @@ static double amult;
 static double tran;
 
 /* function declarations */
-static void conj_grad (dash::Array<int> &colidx, dash::Array<int> &rowstr, dash::Array<double> &x,
-	dash::Array<double> &z, dash::Array<double> &a, dash::Array<double> &p, dash::Array<double> &q,
-	dash::Array<double> &r, dash::Array<double> &w, double *rnorm);
+static void conj_grad (int colidx[], int rowstr[], double x[], 
+	double z[], double a[], double p[], double q[], double r[], 
+	double w[], double *rnorm);
 static void makea(int n, int nz, double a[], int colidx[], int rowstr[],
 	int nonzer, int firstrow, int lastrow, int firstcol,
 	int lastcol, double rcond, int arow[], int acol[],
@@ -74,23 +83,26 @@ static void vecset(int n, double v[], int iv[], int *nzv, int i, double val);
 
 int main(int argc, char **argv)
 {
-
-	dash::init(&argc, &argv);
-
-	dash::Array<double> a(NZ+1);
-	dash::Array<int> rowstr(NA+1+1);
-	dash::Array<int> colidx(NZ+1);
-
-	dash::Array<double> x(NA+2+1);	/* x[1:NA+2] */
-	dash::Array<double> z(NA+2+1);	/* z[1:NA+2] */
-	dash::Array<double> p(NA+2+1);	/* p[1:NA+2] */
-	dash::Array<double> q(NA+2+1);	/* q[1:NA+2] */
-	dash::Array<double> r(NA+2+1);	/* r[1:NA+2] */
-	dash::Array<double> w(NA+2+1);	/* w[1:NA+2] */
-
-
+	
+	static int colidx[NZ+1];	/* colidx[1:NZ] */
+	static int rowstr[NA+1+1];	/* rowstr[1:NA+1] */
+	static int iv[2*NA+1+1];	/* iv[1:2*NA+1] */
+	static int arow[NZ+1];		/* arow[1:NZ] */
+	static int acol[NZ+1];		/* acol[1:NZ] */
+	
+	static double v[NA+1+1];	/* v[1:NA+1] */
+	static double aelt[NZ+1];	/* aelt[1:NZ] */
+	static double a[NZ+1];		/* a[1:NZ] */
+	static double x[NA+2+1];	/* x[1:NA+2] */
+	static double z[NA+2+1];	/* z[1:NA+2] */
+	static double p[NA+2+1];	/* p[1:NA+2] */
+	static double q[NA+2+1];	/* q[1:NA+2] */
+	static double r[NA+2+1];	/* r[1:NA+2] */
+	static double w[NA+2+1];	/* w[1:NA+2] */
+	
+	
 	int i, j, k, it;
-	int nthreads = dash::size();
+	int nthreads = 1;
 	double zeta;
 	double rnorm;
 	double norm_temp11;
@@ -124,169 +136,126 @@ int main(int argc, char **argv)
 		class_npb = 'U';
 	}
 
-	if (0 == dash::myid()) {
+	printf("\n\n NAS Parallel Benchmarks 4.0 OpenMP C++STL_array_OMP version"" - CG Benchmark\n");
+	printf("\n\n Developed by: Dalvan Griebler <dalvan.griebler@acad.pucrs.br>\n");
+	printf("\n\n STL version by: Nicco Mietzsch <nicco.mietzsch@campus.lmu.de>\n");
+	printf(" Size: %10d\n", NA);
+	printf(" Iterations: %5d\n", NITER);
 
-		printf("\n\n NAS Parallel Benchmarks 4.0 OpenMP C++STL_array_OMP version"" - CG Benchmark\n");
-		printf("\n\n Developed by: Dalvan Griebler <dalvan.griebler@acad.pucrs.br>\n");
-		printf("\n\n STL version by: Nicco Mietzsch <nicco.mietzsch@campus.lmu.de>\n");
-		printf(" Size: %10d\n", NA);
-		printf(" Iterations: %5d\n", NITER);
+	naa = NA;
+	nzz = NZ;
 
+	/*--------------------------------------------------------------------
+	c  Initialize random number generator
+	c-------------------------------------------------------------------*/
+	tran    = 314159265.0;
+	amult   = 1220703125.0;
+	zeta    = randlc( &tran, amult );
 
-		naa = NA;
-		nzz = NZ;
-
-		/*--------------------------------------------------------------------
-		c  Initialize random number generator
-		c-------------------------------------------------------------------*/
-		tran    = 314159265.0;
-		amult   = 1220703125.0;
-		zeta    = randlc( &tran, amult );
-
-		/*--------------------------------------------------------------------
-		c
-		c-------------------------------------------------------------------*/
-		static int colidx_init[NZ+1];	/* colidx[1:NZ] */
-		static int rowstr_init[NA+1+1];	/* rowstr[1:NA+1] */
-
-		static double a_init[NZ+1];		/* a[1:NZ] */
-
-
-
-		static int iv[2*NA+1+1];	/* iv[1:2*NA+1] */
-		static int arow[NZ+1];		/* arow[1:NZ] */
-		static int acol[NZ+1];		/* acol[1:NZ] */
-
-		static double v[NA+1+1];	/* v[1:NA+1] */
-		static double aelt[NZ+1];	/* aelt[1:NZ] */
-
-
-		makea(naa, nzz, a_init, colidx_init, rowstr_init, NONZER,
-		firstrow, lastrow, firstcol, lastcol,
-		RCOND, arow, acol, aelt, v, iv, SHIFT);
-
-		/*---------------------------------------------------------------------
-		c  Note: as a result of the above call to makea:
-		c        values of j used in indexing rowstr go from 1 --> lastrow-firstrow+1
-		c        values of colidx which are col indexes go from firstcol --> lastcol
-		c        So:
-		c        Shift the col index vals from actual (firstcol --> lastcol )
-		c        to local, i.e., (1 --> lastcol-firstcol+1)
-		c---------------------------------------------------------------------*/
-
-
-
-		for (j = 1; j <= lastrow - firstrow + 1; j++) {
-			for (k = rowstr[j]; k < rowstr[j+1]; k++) {
-				colidx[k] = colidx[k] - firstcol + 1;
-			}
-		}
-
-		for(i = 0; i < NZ+1; ++i) colidx[i] = colidx_init[i];
-		for(i = 0; i < NA+1+1; ++i) rowstr[i] = rowstr_init[i];
-		for(i = 0; i < NZ+1; ++i) a[i] = a_init[i];
-
-
-		/*--------------------------------------------------------------------
-		c  set starting vector to (1, 1, .... 1)
-		c-------------------------------------------------------------------*/
-
-		for (i = 1; i <= NA+1; i++) {
-			x[i] = 1.0;
-		}
-
-		x[0]=0;
-		z[0]=0;
-
+	int num_workers;
+	if(const char * nw = std::getenv("TBB_NUM_THREADS")) {
+		num_workers = atoi(nw);
+	} else {
+		num_workers = 24;
 	}
-	dash::barrier();
 
+	tbb::task_scheduler_init init(num_workers);
+	
+	nthreads = num_workers;
+	/*--------------------------------------------------------------------
+	c  
+	c-------------------------------------------------------------------*/
+	makea(naa, nzz, a, colidx, rowstr, NONZER,
+	firstrow, lastrow, firstcol, lastcol, 
+	RCOND, arow, acol, aelt, v, iv, SHIFT);
+
+	/*---------------------------------------------------------------------
+	c  Note: as a result of the above call to makea:
+	c        values of j used in indexing rowstr go from 1 --> lastrow-firstrow+1
+	c        values of colidx which are col indexes go from firstcol --> lastcol
+	c        So:
+	c        Shift the col index vals from actual (firstcol --> lastcol ) 
+	c        to local, i.e., (1 --> lastcol-firstcol+1)
+	c---------------------------------------------------------------------*/
+	
+	
+	
+	for (j = 1; j <= lastrow - firstrow + 1; j++) {
+		for (k = rowstr[j]; k < rowstr[j+1]; k++) {
+			colidx[k] = colidx[k] - firstcol + 1;
+		}
+	}
+		
+	/*--------------------------------------------------------------------
+	c  set starting vector to (1, 1, .... 1)
+	c-------------------------------------------------------------------*/
+	
+	for (i = 1; i <= NA+1; i++) {
+		x[i] = 1.0;
+	}
+	
 	zeta = 0.0;
-
+	
 	/*-------------------------------------------------------------------
 	c---->
 	c  Do one iteration untimed to init all code and data page tables
 	c---->                    (then reinit, start timing, to niter its)
 	c-------------------------------------------------------------------*/
 
-	for (it = 1; it <= -1; it++) {
+	for (it = 1; it <= 1; it++) {
 
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
 		c-------------------------------------------------------------------*/
 		conj_grad (colidx, rowstr, x, z, a, p, q, r, w, &rnorm);
-
+		
 		/*--------------------------------------------------------------------
 		c  zeta = shift + 1/(x.z)
 		c  So, first: (x.z)
 		c  Also, find norm of z
 		c  So, first: (z.z)
 		c-------------------------------------------------------------------*/
-		dash::Array<double> norm_temp11(dash::size());
-
-		auto it2 = z.lbegin();
-		for( auto it1 = x.lbegin(); it1 != x.lend(); ++it1) {
-			norm_temp11.local[0] += *it1 * *it2;
-			it2++;
-		}
-
-		norm_temp11.local[0] = dash::reduce(norm_temp11.begin(), norm_temp11.end(), 0.0, std::plus<double>());
-
-		dash::Array<double> norm_temp12(dash::size());
-
-		for( auto it1 = z.lbegin(); it1 != z.lend(); ++it1) {
-			norm_temp11.local[0] += *it1 * *it1;
-		}
-
-		norm_temp12.local[0] = dash::reduce(norm_temp12.begin(), norm_temp12.end(), 0.0, std::plus<double>());
-
-
-		norm_temp12.local[0] = 1.0 / sqrt( norm_temp12.local[0] );
-
+		
+		norm_temp11 = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol+2], &z[1], 0.0);
+		norm_temp12 = std::transform_reduce(pstl::execution::par, &z[1], &z[lastcol-firstcol+2], &z[1], 0.0);
+		
+		
+		norm_temp12 = 1.0 / sqrt( norm_temp12 );
+			
 		/*--------------------------------------------------------------------
 		c  Normalize z to obtain x
 		c-------------------------------------------------------------------*/
-
-		it2 = z.lbegin();
-		for( auto it1 = x.lbegin(); it1 != x.lend(); ++it1) {
-			*it1 = *it2 * norm_temp12.local[0];
-			it2++;
-		}
-
+		
+		std::transform(pstl::execution::par, &z[1], &z[lastcol-firstcol + 2], &x[1], [norm_temp12](double z) -> double {return norm_temp12*z;});
+		
 	} /* end of do one iteration untimed */
 
 	/*--------------------------------------------------------------------
 	c  set starting vector to (1, 1, .... 1)
 	c-------------------------------------------------------------------*/
-	if (0 == dash::myid()) {
-
-		for (i = 1; i <= NA+1; i++) {
-			x[i] = 1.0;
-		}
-
+	
+	for (i = 1; i <= NA+1; i++) {
+		x[i] = 1.0;
 	}
-
+		
 	zeta = 0.0;
 
-	dash::barrier();
+	
 
-	if (0 == dash::myid()) {
-
-		timer_clear( 1 );
-		timer_clear( 2 );
-
-		timer_start( 1 );
-
-	}
-
+	timer_clear( 1 );
+	timer_clear( 2 );
+	//std::clear();
+	
+	timer_start( 1 );
+	
 	/*--------------------------------------------------------------------
 	c---->
 	c  Main Iteration for inverse power method
 	c---->
 	c-------------------------------------------------------------------*/
 
-
-	for (it = 1; it <= -1; it++) {
+	
+	for (it = 1; it <= NITER; it++) {
 
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
@@ -300,83 +269,81 @@ int main(int argc, char **argv)
 		c  So, first: (z.z)
 		c-------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
-
-		//norm_temp11 = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol+2], &z[1], 0.0);
-		//norm_temp12 = std::transform_reduce(pstl::execution::par, &z[1], &z[lastcol-firstcol+2], &z[1], 0.0);
-
-		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
-
-
+		if(TIMER_ENABLED == TRUE) timer_start(2);
+		
+		norm_temp11 = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol+2], &z[1], 0.0);
+		norm_temp12 = std::transform_reduce(pstl::execution::par, &z[1], &z[lastcol-firstcol+2], &z[1], 0.0);
+		
+		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		
+	
 		norm_temp12 = 1.0 / sqrt( norm_temp12 );
 
 		zeta = SHIFT + 1.0 / norm_temp11;
+			
 
-
-
+	
 		if( it == 1 ) {
 			printf("   iteration           ||r||                 zeta\n");
 		}
-
+		
 		printf("    %5d       %20.14e%20.13e\n", it, rnorm, zeta);
-
+			
 
 		/*--------------------------------------------------------------------
 		c  Normalize z to obtain x
 		c-------------------------------------------------------------------*/
 
-		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
-
-		//std::transform(pstl::execution::par, &z[1], &z[lastcol-firstcol + 2], &x[1], [norm_temp12](double z) -> double {return norm_temp12*z;});
-
-		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
-
+		if(TIMER_ENABLED == TRUE) timer_start(2);
+		
+		std::transform(pstl::execution::par, &z[1], &z[lastcol-firstcol + 2], &x[1], [norm_temp12](double z) -> double {return norm_temp12*z;});
+		
+		if(TIMER_ENABLED == TRUE) timer_stop(2);
+		
 		/* end of main iter inv pow meth */
 
 	}
+	
 
-	dash::barrier();
+	timer_stop( 1 );
+	/*--------------------------------------------------------------------
+	c  End of timed section
+	c-------------------------------------------------------------------*/
 
-	if (0 == dash::myid()) {
+	t = timer_read( 1 );
 
+	printf(" Benchmark completed\n");
 
-		timer_stop( 1 );
-		/*--------------------------------------------------------------------
-		c  End of timed section
-		c-------------------------------------------------------------------*/
-
-		t = timer_read( 1 );
-
-		printf(" Benchmark completed\n");
-
-		epsilon = 1.0e-10;
-		if (class_npb != 'U') {
-			if (fabs(zeta - zeta_verify_value) <= epsilon) {
-				verified = TRUE;
-				printf(" VERIFICATION SUCCESSFUL\n");
-				printf(" Zeta is    %20.12e\n", zeta);
-				printf(" Error is   %20.12e\n", zeta - zeta_verify_value);
-			} else {
-				verified = FALSE;
-				printf(" VERIFICATION FAILED\n");
-				printf(" Zeta                %20.12e\n", zeta);
-				printf(" The correct zeta is %20.12e\n", zeta_verify_value);
-			}
+	epsilon = 1.0e-10;
+	if (class_npb != 'U') {
+		if (fabs(zeta - zeta_verify_value) <= epsilon) {
+			verified = TRUE;
+			printf(" VERIFICATION SUCCESSFUL\n");
+			printf(" Zeta is    %20.12e\n", zeta);
+			printf(" Error is   %20.12e\n", zeta - zeta_verify_value);
 		} else {
 			verified = FALSE;
-			printf(" Problem size unknown\n");
-			printf(" NO VERIFICATION PERFORMED\n");
+			printf(" VERIFICATION FAILED\n");
+			printf(" Zeta                %20.12e\n", zeta);
+			printf(" The correct zeta is %20.12e\n", zeta_verify_value);
 		}
-		if ( t != 0.0 ) {
-			mflops = (2.0*NITER*NA)
-			* (3.0+(NONZER*(NONZER+1)) + 25.0*(5.0+(NONZER*(NONZER+1))) + 3.0 )
-			/ t / 1000000.0;
-		} else {
-			mflops = 0.0;
-		}
-		c_print_results((char*)"CG", class_npb, NA, 0, 0, NITER, nthreads, t, mflops, (char*)"          floating point", verified, (char*)NPBVERSION, (char*)COMPILETIME, (char*)CS1, (char*)CS2, (char*)CS3, (char*)CS4, (char*)CS5, (char*)CS6, (char*)CS7);
-
+	} else {
+		verified = FALSE;
+		printf(" Problem size unknown\n");
+		printf(" NO VERIFICATION PERFORMED\n");
 	}
+	if ( t != 0.0 ) {
+		mflops = (2.0*NITER*NA)
+		* (3.0+(NONZER*(NONZER+1)) + 25.0*(5.0+(NONZER*(NONZER+1))) + 3.0 )
+		/ t / 1000000.0;
+	} else {
+		mflops = 0.0;
+	}
+	c_print_results((char*)"CG", class_npb, NA, 0, 0, NITER, nthreads, t, mflops, (char*)"          floating point", verified, (char*)NPBVERSION, (char*)COMPILETIME, (char*)CS1, (char*)CS2, (char*)CS3, (char*)CS4, (char*)CS5, (char*)CS6, (char*)CS7);
+	if(TIMER_ENABLED == TRUE) printf(" time spent in STL: %15.3f seconds\n", timer_read(2));
+	
+	//printf("\n mystl statistics:\n");
+	//std::dump();
 
 	return 0;
 }
@@ -384,21 +351,21 @@ int main(int argc, char **argv)
 /*--------------------------------------------------------------------
 c-------------------------------------------------------------------*/
 static void conj_grad (
-	dash::Array<int> &colidx,	/* colidx[1:nzz] */
-	dash::Array<int> &rowstr,	/* rowstr[1:naa+1] */
-	dash::Array<double> &x,	/* x[*] */
-	dash::Array<double> &z,	/* z[*] */
-	dash::Array<double> &a,	/* a[1:nzz] */
-	dash::Array<double> &p,	/* p[*] */
-	dash::Array<double> &q,	/* q[*] */
-	dash::Array<double> &r,	/* r[*] */
-	dash::Array<double> &w,	/* w[*] */
+	int colidx[],	/* colidx[1:nzz] */
+	int rowstr[],	/* rowstr[1:naa+1] */
+	double x[],	/* x[*] */
+	double z[],	/* z[*] */
+	double a[],	/* a[1:nzz] */
+	double p[],	/* p[*] */
+	double q[],	/* q[*] */
+	double r[],	/* r[*] */
+	double w[],	/* w[*] */
 	double *rnorm )
 /*--------------------------------------------------------------------
 c-------------------------------------------------------------------*/
 
 /*---------------------------------------------------------------------
-c  Floaging point arrays here are named as in NPB1 spec discussion of
+c  Floaging point arrays here are named as in NPB1 spec discussion of 
 c  CG algorithm
 c---------------------------------------------------------------------*/
 {
@@ -406,73 +373,73 @@ c---------------------------------------------------------------------*/
 	double d, sum, rho, rho0, alpha, beta;
 	int j;
 	int cgit, cgitmax = 25;
-
-
+	
+	
 	rho = 0.0;
-
+	
 	/*--------------------------------------------------------------------
 	c  Initialize the CG algorithm:
 	c-------------------------------------------------------------------*/
-
+	
 	if(TIMER_ENABLED == TRUE) timer_start(2);
-
-	//std::fill(pstl::execution::par, &q[1], &q[naa + 2], 0.0);
-	//std::fill(pstl::execution::par, &z[1], &z[naa + 2], 0.0);
-	//std::fill(pstl::execution::par, &w[1], &w[naa + 2], 0.0);
-
-	//std::copy(pstl::execution::par, &x[1], &x[naa + 2], &r[1]);
-	//std::copy(pstl::execution::par, &r[1], &r[naa + 2], &p[1]);
-
+	
+	std::fill(pstl::execution::par, &q[1], &q[naa + 2], 0.0);
+	std::fill(pstl::execution::par, &z[1], &z[naa + 2], 0.0);
+	std::fill(pstl::execution::par, &w[1], &w[naa + 2], 0.0);
+	
+	std::copy(pstl::execution::par, &x[1], &x[naa + 2], &r[1]);
+	std::copy(pstl::execution::par, &r[1], &r[naa + 2], &p[1]);
+	
 	if(TIMER_ENABLED == TRUE) timer_stop(2);
-
+	
 	/*--------------------------------------------------------------------
 	c  rho = r.r
 	c  Now, obtain the norm of r: First, sum squares of r elements locally...
 	c-------------------------------------------------------------------*/
-
+	
 	if(TIMER_ENABLED == TRUE) timer_start(2);
-
-	//rho = std::transform_reduce(pstl::execution::par, &r[1], &r[lastcol-firstcol+2], &r[1], 0.0);
-
+	
+	rho = std::transform_reduce(pstl::execution::par, &r[1], &r[lastcol-firstcol+2], &r[1], 0.0);
+	
 	if(TIMER_ENABLED == TRUE) timer_stop(2);
-
+	
 	/*--------------------------------------------------------------------
 	c---->
 	c  The conj grad iteration loop
 	c---->
 	c-------------------------------------------------------------------*/
-
+	
 	if(TIMER_ENABLED == TRUE) timer_start(2);
-
+	
 	int v[lastrow-firstrow+1];
-	//std::iota(&v[0], &v[lastrow-firstrow+1], 1);
-
+	std::iota(&v[0], &v[lastrow-firstrow+1], 1);
+	
 	if(TIMER_ENABLED == TRUE) timer_stop(2);
-
+		
 	for (cgit = 1; cgit <= cgitmax; cgit++) {
-
+			
 		rho0 = rho;
 		d = 0.0;
 		rho = 0.0;
-
-
+		
+		
 		/*--------------------------------------------------------------------
 		c  q = A.p
 		c  The partition submatrix-vector multiply: use workspace w
 		c---------------------------------------------------------------------
 		C
-		C  NOTE: this version of the multiply is actually (slightly: maybe %5)
-		C        faster on the sp2 on 16 nodes than is the unrolled-by-2 version
-		C        below.   On the Cray t3d, the reverse is true, i.e., the
-		C        unrolled-by-two version is some 10% faster.
+		C  NOTE: this version of the multiply is actually (slightly: maybe %5) 
+		C        faster on the sp2 on 16 nodes than is the unrolled-by-2 version 
+		C        below.   On the Cray t3d, the reverse is true, i.e., the 
+		C        unrolled-by-two version is some 10% faster.  
 		C        The unrolled-by-8 version below is significantly faster
 		C        on the Cray t3d - overall speed of code is 1.5 times faster.
 		*/
-
+		
 		/* rolled version */
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		/*
+		
 		std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &p, &colidx, &w](int j)
 		{
 			double sum = 0.0;
@@ -480,15 +447,15 @@ c---------------------------------------------------------------------*/
 				sum = sum + a[k]*p[colidx[k]];
 			}
 			w[j] = sum;
-		});*/
-
+		});
+		
 		/*
 		//unrolled-by-two version
 		std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &p, &colidx, &w](int j)
 		{
 			int iresidue;
 			double sum1, sum2;
-			int i = rowstr[j];
+			int i = rowstr[j]; 
 			iresidue = (rowstr[j+1]-i) % 2;
 			sum1 = 0.0;
 			sum2 = 0.0;
@@ -500,12 +467,12 @@ c---------------------------------------------------------------------*/
 			w[j] = sum1 + sum2;
 		});
 		*/
-		/*
+		/* 
 		//unrolled-by-8 version
 		std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &p, &colidx, &w](int j)
 		{
 			int iresidue, k;
-			int i = rowstr[j];
+			int i = rowstr[j]; 
 			iresidue = (rowstr[j+1]-i) % 8;
 			double sum = 0.0;
 			for (k = i; k <= i+iresidue-1; k++) {
@@ -524,77 +491,77 @@ c---------------------------------------------------------------------*/
 			w[j] = sum;
 		});
 		*/
-
+		
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::copy(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], &q[1]);
+		std::copy(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], &q[1]);
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Clear w for reuse...
 		c-------------------------------------------------------------------*/
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::fill(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], 0.0);
+		std::fill(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], 0.0);
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain p.q
 		c-------------------------------------------------------------------*/
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//d = std::transform_reduce(pstl::execution::par, &p[1], &p[lastcol-firstcol+2], &q[1], 0.0);
+		d = std::transform_reduce(pstl::execution::par, &p[1], &p[lastcol-firstcol+2], &q[1], 0.0);
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain alpha = rho / (p.q)
 		c-------------------------------------------------------------------*/
-
+		
 		alpha = rho0 / d;
-
+		
 		/*--------------------------------------------------------------------
 		c  Save a temporary of rho
 		c-------------------------------------------------------------------*/
 			/*	rho0 = rho;*/
-
+		
 		/*---------------------------------------------------------------------
 		c  Obtain z = z + alpha*p
 		c  and    r = r - alpha*q
 		c---------------------------------------------------------------------*/
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::transform(pstl::execution::par, &p[1], &p[lastcol-firstcol + 2], &z[1], &z[1], [alpha](double p, double z) -> double {return z + alpha*p;});
-		//std::transform(pstl::execution::par, &q[1], &q[lastcol-firstcol + 2], &r[1], &r[1], [alpha](double q, double r) -> double {return r - alpha*q;});
+		std::transform(pstl::execution::par, &p[1], &p[lastcol-firstcol + 2], &z[1], &z[1], [alpha](double p, double z) -> double {return z + alpha*p;});
+		std::transform(pstl::execution::par, &q[1], &q[lastcol-firstcol + 2], &r[1], &r[1], [alpha](double q, double r) -> double {return r - alpha*q;});
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
 		/*---------------------------------------------------------------------
 		c  rho = r.r
 		c  Now, obtain the norm of r: First, sum squares of r elements locally...
 		c---------------------------------------------------------------------*/
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//rho = std::transform_reduce(pstl::execution::par, &r[1], &r[lastcol-firstcol+2], &r[1], 0.0);
+		rho = std::transform_reduce(pstl::execution::par, &r[1], &r[lastcol-firstcol+2], &r[1], 0.0);
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain beta:
 		c-------------------------------------------------------------------*/
-
+		
 		beta = rho / rho0;
-
+		
 		/*--------------------------------------------------------------------
 		c  p = r + beta*p
 		c-------------------------------------------------------------------*/
-
+		
 		if(TIMER_ENABLED == TRUE) timer_start(2);
-		//std::transform(pstl::execution::par, &p[1], &p[lastcol-firstcol + 2], &r[1], &p[1], [beta](double p, double r) -> double {return r + beta*p;});
+		std::transform(pstl::execution::par, &p[1], &p[lastcol-firstcol + 2], &r[1], &p[1], [beta](double p, double r) -> double {return r + beta*p;});
 		if(TIMER_ENABLED == TRUE) timer_stop(2);
 	} /* end of do cgit=1,cgitmax */
-
+	
 	/*---------------------------------------------------------------------
 	c  Compute residual norm explicitly:  ||r|| = ||x - A.z||
 	c  First, form A.z
 	c  The partition submatrix-vector multiply
 	c---------------------------------------------------------------------*/
-
+	
 	sum = 0.0;
-	if(TIMER_ENABLED == TRUE) timer_start(2);/*
+	if(TIMER_ENABLED == TRUE) timer_start(2);
 	std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &z, &colidx, &w](int j)
 	{
 		double d = 0.0;
@@ -602,21 +569,21 @@ c---------------------------------------------------------------------*/
 			d = d + a[k]*z[colidx[k]];
 		}
 		w[j] = d;
-	});*/
+	});
 	if(TIMER_ENABLED == TRUE) timer_stop(2);
-
+	
 	if(TIMER_ENABLED == TRUE) timer_start(2);
-	//std::copy(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], &r[1]);
+	std::copy(pstl::execution::par, &w[1], &w[lastcol-firstcol + 2], &r[1]);
 	if(TIMER_ENABLED == TRUE) timer_stop(2);
 	/*--------------------------------------------------------------------
 	c  At this point, r contains A.z
 	c-------------------------------------------------------------------*/
 	if(TIMER_ENABLED == TRUE) timer_start(2);
-	//sum = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol + 2], &r[1], 0.0, std::plus<double>(), [](double x1, double x2) -> double {return (x1-x2)*(x1-x2);});
+	sum = std::transform_reduce(pstl::execution::par, &x[1], &x[lastcol-firstcol + 2], &r[1], 0.0, std::plus<double>(), [](double x1, double x2) -> double {return (x1-x2)*(x1-x2);});
 	if(TIMER_ENABLED == TRUE) timer_stop(2);
-
+	
 	(*rnorm) = sqrt(sum);
-
+	
 }
 
 /*---------------------------------------------------------------------
@@ -680,7 +647,7 @@ static void makea(
 	c  Initialize colidx(n+1 .. 2n) to zero.
 	c  Used by sprnvc to mark nonzero positions
 	c---------------------------------------------------------------------*/
-
+	
 	for (i = 1; i <= n; i++) {
 		colidx[n+i] = 0;
 	}
@@ -774,7 +741,7 @@ c---------------------------------------------------------------------*/
 	/*--------------------------------------------------------------------
 	c     ...count the number of triples in each row
 	c-------------------------------------------------------------------*/
-
+	
 	for (j = 1; j <= n; j++) {
 		rowstr[j] = 0;
 		mark[j] = FALSE;
@@ -818,7 +785,7 @@ c---------------------------------------------------------------------*/
 	c       ... generate the actual output rows by adding elements
 	c-------------------------------------------------------------------*/
 	nza = 0;
-
+	 
 	for (i = 1; i <= n; i++) {
 		x[i] = 0.0;
 		mark[i] = FALSE;
