@@ -53,7 +53,7 @@ static double amult;
 static double tran;
 
 /* function declarations */
-static void conj_grad (dash::Array<int> &colidx, dash::Array<int> &rowstr, dash::Array<double> &x,
+static void conj_grad (dash::Array<int> &colidx, dash::Array<int> &rowstr, dash::Array<int> &rowstrl, dash::Array<double> &x,
 	dash::Array<double> &z, dash::Array<double> &a, dash::Array<double> &p, dash::Array<double> &q,
 	dash::Array<double> &r, dash::Array<double> &w, double *rnorm);
 static void makea(int n, int nz, double a[], int colidx[], int rowstr[],
@@ -81,12 +81,12 @@ int main(int argc, char **argv)
 	dash::Array<int> rowstr(NA+1+1);
 	dash::Array<int> colidx(NZ+1);
 
-	dash::Array<double> x(NA+2+1);	/* x[1:NA+2] */
-	dash::Array<double> z(NA+2+1);	/* z[1:NA+2] */
-	dash::Array<double> p(NA+2+1);	/* p[1:NA+2] */
-	dash::Array<double> q(NA+2+1);	/* q[1:NA+2] */
-	dash::Array<double> r(NA+2+1);	/* r[1:NA+2] */
-	dash::Array<double> w(NA+2+1);	/* w[1:NA+2] */
+	dash::Array<double> x(NA+1);	/* x[1:NA] */
+	dash::Array<double> z(NA+1);	/* z[1:NA] */
+	dash::Array<double> p(NA+1);	/* p[1:NA] */
+	dash::Array<double> q(NA+1);	/* q[1:NA] */
+	dash::Array<double> r(NA+1);	/* r[1:NA] */
+	dash::Array<double> w(NA+1);	/* w[1:NA] */
 
 
 	int i, j, k, it;
@@ -198,6 +198,20 @@ int main(int argc, char **argv)
 	}
 	dash::barrier();
 
+	//setup local arrays
+
+	int elem_per_unit = ceil(((double) NA+1)/dash::size());
+
+	dash::Array<int> rowstrl((elem_per_unit+1)*dash::size());
+
+	for(int i = 0; i < elem_per_unit+1; i++) {
+			rowstrl.local[i] = rowstr[min(dash::myid()*elem_per_unit + i, NA+1)];
+	}
+
+
+
+	dash::barrier();
+
 	zeta = 0.0;
 
 	/*-------------------------------------------------------------------
@@ -211,7 +225,7 @@ int main(int argc, char **argv)
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
 		c-------------------------------------------------------------------*/
-		conj_grad (colidx, rowstr, x, z, a, p, q, r, w, &rnorm);
+		conj_grad (colidx, rowstr, rowstrl, x, z, a, p, q, r, w, &rnorm);
 
 		/*--------------------------------------------------------------------
 		c  zeta = shift + 1/(x.z)
@@ -287,7 +301,7 @@ int main(int argc, char **argv)
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
 		c-------------------------------------------------------------------*/
-		conj_grad(colidx, rowstr, x, z, a, p, q, r, w, &rnorm);
+		conj_grad(colidx, rowstr, rowstrl, x, z, a, p, q, r, w, &rnorm);
 		/*--------------------------------------------------------------------
 		c  zeta = shift + 1/(x.z)
 		c  So, first: (x.z)
@@ -400,6 +414,7 @@ c-------------------------------------------------------------------*/
 static void conj_grad (
 	dash::Array<int> &colidx,	/* colidx[1:nzz] */
 	dash::Array<int> &rowstr,	/* rowstr[1:naa+1] */
+	dash::Array<int> &rowstrl,	/* rowstr[1:naa+1] */
 	dash::Array<double> &x,	/* x[*] */
 	dash::Array<double> &z,	/* z[*] */
 	dash::Array<double> &a,	/* a[1:nzz] */
@@ -429,6 +444,8 @@ c---------------------------------------------------------------------*/
 
 
 	rho.local[0] = 0.0;
+
+	int elem_per_unit = ceil(((double) NA+1)/dash::size());
 
 	/*--------------------------------------------------------------------
 	c  Initialize the CG algorithm:
@@ -498,7 +515,7 @@ c---------------------------------------------------------------------*/
 		/* rolled version */
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
-
+		/*
 		dash::for_each(v.begin(), v.end(), [&rowstr, &a, &p, &colidx, &w](int j)
 		{
 			double sum = 0.0;
@@ -506,7 +523,15 @@ c---------------------------------------------------------------------*/
 				sum = sum + a[k]*p[colidx[k]];
 			}
 			w[j] = sum;
-		});
+		});*/
+
+		for(int j = 0; j < elem_per_unit; j++) {
+			double sum = 0.0;
+			for (int k = rowstrl.local[j]; k < rowstrl.local[j+1]; k++) {
+				sum = sum + a[k]*p[colidx[k]];
+			}
+			w.local[j] = sum;
+		}
 
 		/*
 		//unrolled-by-two version
@@ -680,7 +705,7 @@ c---------------------------------------------------------------------*/
 	}
 
 	sum.local[0] = dash::reduce(sum.begin(), sum.end(), 0.0, std::plus<double>());
-	
+
 	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
 	(*rnorm) = sqrt(sum.local[0]);
