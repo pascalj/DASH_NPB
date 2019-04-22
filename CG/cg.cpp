@@ -53,8 +53,8 @@ static double amult;
 static double tran;
 
 /* function declarations */
-static void conj_grad (dash::Array<int> &colidx, dash::Array<int> &rowstr, dash::Array<int> &rowstrl, dash::Array<double> &x,
-	dash::Array<double> &z, dash::Array<double> &a, dash::Array<double> &p, dash::Array<double> &q,
+static void conj_grad (dash::Array<int, int, dash::CSRPattern<1>> &colidx, dash::Array<int> &rowstr, dash::Array<double> &x,
+	dash::Array<double> &z, dash::Array<double, int, dash::CSRPattern<1>> &al, dash::Array<double> &p, dash::Array<double> &q,
 	dash::Array<double> &r, dash::Array<double> &w, double *rnorm);
 static void makea(int n, int nz, double a[], int colidx[], int rowstr[],
 	int nonzer, int firstrow, int lastrow, int firstcol,
@@ -77,9 +77,9 @@ int main(int argc, char **argv)
 
 	dash::init(&argc, &argv);
 
-	dash::Array<double> a(NZ+1);
-	dash::Array<int> rowstr(NA+1+1);
-	dash::Array<int> colidx(NZ+1);
+	dash::Array<double> a_global(NZ+1);
+	dash::Array<int> rowstr_global(NA+1+1);
+	dash::Array<int> colidx_global(NZ+1);
 
 	dash::Array<double> x(NA+1);	/* x[1:NA] */
 	dash::Array<double> z(NA+1);	/* z[1:NA] */
@@ -165,26 +165,9 @@ int main(int argc, char **argv)
 		firstrow, lastrow, firstcol, lastcol,
 		RCOND, arow, acol, aelt, v, iv, SHIFT);
 
-		/*---------------------------------------------------------------------
-		c  Note: as a result of the above call to makea:
-		c        values of j used in indexing rowstr go from 1 --> lastrow-firstrow+1
-		c        values of colidx which are col indexes go from firstcol --> lastcol
-		c        So:
-		c        Shift the col index vals from actual (firstcol --> lastcol )
-		c        to local, i.e., (1 --> lastcol-firstcol+1)
-		c---------------------------------------------------------------------*/
-
-
-
-		for (j = 1; j <= lastrow - firstrow + 1; j++) {
-			for (k = rowstr[j]; k < rowstr[j+1]; k++) {
-				colidx[k] = colidx[k] - firstcol + 1;
-			}
-		}
-
-		for(i = 0; i < NZ+1; ++i) colidx[i] = colidx_init[i];
-		for(i = 0; i < NA+1+1; ++i) rowstr[i] = rowstr_init[i];
-		for(i = 0; i < NZ+1; ++i) a[i] = a_init[i];
+		for(i = 0; i < NZ+1; ++i) colidx_global[i] = colidx_init[i];
+		for(i = 0; i < NA+1+1; ++i) rowstr_global[i] = rowstr_init[i];
+		for(i = 0; i < NZ+1; ++i) a_global[i] = a_init[i];
 
 
 		/*--------------------------------------------------------------------
@@ -199,16 +182,48 @@ int main(int argc, char **argv)
 	dash::barrier();
 
 	//setup local arrays
+	// first, setup rowstr
 
 	int elem_per_unit = ceil(((double) NA+1)/dash::size());
 
-	dash::Array<int> rowstrl((elem_per_unit+1)*dash::size());
+	dash::Array<int> rowstr((elem_per_unit+1)*dash::size());
 
 	for(int i = 0; i < elem_per_unit+1; i++) {
-			rowstrl.local[i] = rowstr[min(dash::myid()*elem_per_unit + i, NA+1)];
+			rowstr.local[i] = rowstr_global[min(dash::myid()*elem_per_unit + i, NA+1)];
 	}
 
 
+	//now setup a and colidx
+
+	typedef dash::CSRPattern<1>           pattern_t;
+  typedef int                           index_t;
+	typedef typename pattern_t::size_type extent_t;
+
+	std::vector<extent_t> local_sizes;
+	dash::Array<int> my_elem_count(dash::size());
+
+	my_elem_count.local[0] = rowstr.local[elem_per_unit] - rowstr.local[0];
+
+	for (int unit_idx = 0; unit_idx < dash::size(); ++unit_idx) {
+    local_sizes.push_back(my_elem_count[unit_idx]);
+  }
+
+	pattern_t pattern(local_sizes);
+
+	dash::Array<double, index_t, pattern_t> a(pattern);
+	dash::Array<int, index_t, pattern_t> colidx(pattern);
+
+	int offset = 0;
+	for(int k = 0; k < dash::myid(); ++k) offset += my_elem_count[k];
+
+	for(int i = 0; i < my_elem_count.local[0]; ++i) {
+		a.local[i] = a_global[offset + i];
+		colidx.local[i] = colidx_global[offset + i];
+	}
+
+	for(int i = 0; i < elem_per_unit+1; ++i) {
+		rowstr.local[i] -= offset;
+	}
 
 	dash::barrier();
 
@@ -225,7 +240,7 @@ int main(int argc, char **argv)
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
 		c-------------------------------------------------------------------*/
-		conj_grad (colidx, rowstr, rowstrl, x, z, a, p, q, r, w, &rnorm);
+		conj_grad (colidx, rowstr, x, z, a, p, q, r, w, &rnorm);
 
 		/*--------------------------------------------------------------------
 		c  zeta = shift + 1/(x.z)
@@ -301,7 +316,7 @@ int main(int argc, char **argv)
 		/*--------------------------------------------------------------------
 		c  The call to the conjugate gradient routine:
 		c-------------------------------------------------------------------*/
-		conj_grad(colidx, rowstr, rowstrl, x, z, a, p, q, r, w, &rnorm);
+		conj_grad(colidx, rowstr, x, z, a, p, q, r, w, &rnorm);
 		/*--------------------------------------------------------------------
 		c  zeta = shift + 1/(x.z)
 		c  So, first: (x.z)
@@ -412,12 +427,11 @@ int main(int argc, char **argv)
 /*--------------------------------------------------------------------
 c-------------------------------------------------------------------*/
 static void conj_grad (
-	dash::Array<int> &colidx,	/* colidx[1:nzz] */
+	dash::Array<int, int, dash::CSRPattern<1>> &colidx,	/* colidx[1:nzz] */
 	dash::Array<int> &rowstr,	/* rowstr[1:naa+1] */
-	dash::Array<int> &rowstrl,	/* rowstr[1:naa+1] */
 	dash::Array<double> &x,	/* x[*] */
 	dash::Array<double> &z,	/* z[*] */
-	dash::Array<double> &a,	/* a[1:nzz] */
+	dash::Array<double, int, dash::CSRPattern<1>> &a,	/* a[1:nzz] */
 	dash::Array<double> &p,	/* p[*] */
 	dash::Array<double> &q,	/* q[*] */
 	dash::Array<double> &r,	/* r[*] */
@@ -483,15 +497,6 @@ c---------------------------------------------------------------------*/
 	c---->
 	c-------------------------------------------------------------------*/
 
-	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
-
-	dash::Array<int> v(lastrow-firstrow+1);
-
-	if(0 == dash::myid()) std::iota(v.begin(), v.end(), 1);
-	dash::barrier();
-
-	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
-
 	for (cgit = 1; cgit <= cgitmax; cgit++) {
 
 		rho0.local[0] = rho.local[0];
@@ -512,69 +517,64 @@ c---------------------------------------------------------------------*/
 		C        on the Cray t3d - overall speed of code is 1.5 times faster.
 		*/
 
-		/* rolled version */
+		double p_local[p.size()];
+		dash::copy(p.begin(), p.end(), &p_local[0]);
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
-		/*
-		dash::for_each(v.begin(), v.end(), [&rowstr, &a, &p, &colidx, &w](int j)
-		{
-			double sum = 0.0;
-			for (int k = rowstr[j]; k < rowstr[j+1]; k++) {
-				sum = sum + a[k]*p[colidx[k]];
-			}
-			w[j] = sum;
-		});*/
+
+		// rolled version
 
 		for(int j = 0; j < elem_per_unit; j++) {
 			double sum = 0.0;
-			for (int k = rowstrl.local[j]; k < rowstrl.local[j+1]; k++) {
-				sum = sum + a[k]*p[colidx[k]];
+			for (int k = rowstr.local[j]; k < rowstr.local[j+1]; k++) {
+				sum = sum + a.local[k]*p_local[colidx.local[k]];
 			}
 			w.local[j] = sum;
 		}
 
-		/*
+
 		//unrolled-by-two version
-		std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &p, &colidx, &w](int j)
-		{
+		/*
+		for(int j = 0; j < elem_per_unit; j++) {
 			int iresidue;
 			double sum1, sum2;
-			int i = rowstr[j];
-			iresidue = (rowstr[j+1]-i) % 2;
+			int i = rowstr.local[j];
+			iresidue = (rowstr.local[j+1]-i) % 2;
 			sum1 = 0.0;
 			sum2 = 0.0;
-			if (iresidue == 1) sum1 = sum1 + a[i]*p[colidx[i]];
-			for (int k = i+iresidue; k <= rowstr[j+1]-2; k += 2) {
-				sum1 = sum1 + a[k]   * p[colidx[k]];
-				sum2 = sum2 + a[k+1] * p[colidx[k+1]];
+			if (iresidue == 1) sum1 = sum1 + a.local[i]*p_local[colidx.local[i]];
+			for (int k = i+iresidue; k <= rowstr.local[j+1]-2; k += 2) {
+				sum1 = sum1 + a.local[k]   * p_local[colidx.local[k]];
+				sum2 = sum2 + a.local[k+1] * p_local[colidx.local[k+1]];
 			}
-			w[j] = sum1 + sum2;
-		});
-		*/
-		/*
+			w.local[j] = sum1 + sum2;
+		}*/
+
+
 		//unrolled-by-8 version
-		std::for_each(pstl::execution::par, &v[0], &v[lastrow-firstrow+1], [&rowstr, &a, &p, &colidx, &w](int j)
-		{
+		/*
+		for(int j = 0; j < elem_per_unit; j++) {
 			int iresidue, k;
-			int i = rowstr[j];
-			iresidue = (rowstr[j+1]-i) % 8;
+			int i = rowstr.local[j];
+			iresidue = (rowstr.local[j+1]-i) % 8;
 			double sum = 0.0;
 			for (k = i; k <= i+iresidue-1; k++) {
-				sum = sum +  a[k] * p[colidx[k]];
+				sum = sum +  a.local[k] * p_local[colidx.local[k]];
 			}
-			for (k = i+iresidue; k <= rowstr[j+1]-8; k += 8) {
-				sum = sum + a[k  ] * p[colidx[k  ]]
-				+ a[k+1] * p[colidx[k+1]]
-				+ a[k+2] * p[colidx[k+2]]
-				+ a[k+3] * p[colidx[k+3]]
-				+ a[k+4] * p[colidx[k+4]]
-				+ a[k+5] * p[colidx[k+5]]
-				+ a[k+6] * p[colidx[k+6]]
-				+ a[k+7] * p[colidx[k+7]];
+			for (k = i+iresidue; k <= rowstr.local[j+1]-8; k += 8) {
+				sum = sum
+				+ a.local[k  ] * p_local[colidx.local[k  ]]
+				+ a.local[k+1] * p_local[colidx.local[k+1]]
+				+ a.local[k+2] * p_local[colidx.local[k+2]]
+				+ a.local[k+3] * p_local[colidx.local[k+3]]
+				+ a.local[k+4] * p_local[colidx.local[k+4]]
+				+ a.local[k+5] * p_local[colidx.local[k+5]]
+				+ a.local[k+6] * p_local[colidx.local[k+6]]
+				+ a.local[k+7] * p_local[colidx.local[k+7]];
 			}
-			w[j] = sum;
-		});
-		*/
+			w.local[j] = sum;
+		}*/
+
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
@@ -582,11 +582,11 @@ c---------------------------------------------------------------------*/
 		std::copy(w.lbegin(), w.lend(), q.lbegin());
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*--------------------------------------------------------------------
-		c  Clear w for reuse...
+		c  Clear w for reuse... Do we really need that? Commented it out for the moment.
 		c-------------------------------------------------------------------*/
 
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
-		dash::fill(w.begin(), w.end(), 0.0);
+		//dash::fill(w.begin(), w.end(), 0.0);
 		if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 		/*--------------------------------------------------------------------
 		c  Obtain p.q
@@ -679,14 +679,16 @@ c---------------------------------------------------------------------*/
 	sum.local[0] = 0.0;
 	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_start(2);
 
-	dash::for_each(v.begin(), v.end(), [&rowstr, &a, &z, &colidx, &w](int j)
-	{
-		double d = 0.0;
-		for (int k = rowstr[j]; k <= rowstr[j+1]-1; k++) {
-			d = d + a[k]*z[colidx[k]];
+	double z_local[p.size()];
+	dash::copy(z.begin(), z.end(), &z_local[0]);
+
+	for(int j = 0; j < elem_per_unit; j++) {
+		double sum = 0.0;
+		for (int k = rowstr.local[j]; k < rowstr.local[j+1]; k++) {
+			sum = sum + a.local[k]*z_local[colidx.local[k]];
 		}
-		w[j] = d;
-	});
+		w.local[j] = sum;
+	}
 
 	if(TIMER_ENABLED == TRUE && 0 == dash::myid()) timer_stop(2);
 
