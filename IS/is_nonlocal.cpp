@@ -33,7 +33,7 @@
 /* Example:  SGI O2000:   400% slowdown with buckets (Wow!)      */
 /*****************************************************************/
 /* To disable the use of buckets, comment out the following line */
-#define USE_BUCKETS
+//#define USE_BUCKETS
 
 /* Uncomment below for cyclic schedule */
 /*#define SCHED_CYCLIC*/
@@ -150,7 +150,7 @@ INT_TYPE partial_verify_vals[TEST_ARRAY_SIZE];
 
 #ifdef USE_BUCKETS
 dash::Array<INT_TYPE> bucket_size;
-//INT_TYPE bucket_ptrs[NUM_BUCKETS];
+INT_TYPE bucket_ptrs[NUM_BUCKETS];
 #endif
 
 
@@ -553,8 +553,7 @@ void rank( int iteration )
     /*  on cache size, problem size. */
 #ifdef USE_BUCKETS
 
-    //INT_TYPE bucket_ptrs_local[NUM_BUCKETS];
-    dash::Array<INT_TYPE> bucket_ptrs(NUM_BUCKETS*num_procs);
+    INT_TYPE bucket_ptrs_local[NUM_BUCKETS];
 
     /*  Initialize */
     for( i=0; i<NUM_BUCKETS; i++ )
@@ -568,52 +567,28 @@ void rank( int iteration )
 
     /*  Accumulative bucket sizes are the bucket pointers.
     These are global sizes accumulated upon to each bucket */
-    bucket_ptrs.local[0] = 0;
+    bucket_ptrs_local[0] = 0;
     for( k=0; k< myid; k++ )  {
-      bucket_ptrs.local[0] += bucket_size[k*NUM_BUCKETS];
+      bucket_ptrs_local[0] += bucket_size[k*NUM_BUCKETS];
     }
 
     for( i=1; i< NUM_BUCKETS; i++ ) {
-      bucket_ptrs.local[i] = bucket_ptrs.local[i-1];
+      bucket_ptrs_local[i] = bucket_ptrs_local[i-1];
       for( k=0; k< myid; k++ )
-        bucket_ptrs.local[i] += bucket_size[k*NUM_BUCKETS+i];
+        bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
         for( k=myid; k< num_procs; k++ )
-          bucket_ptrs.local[i] += bucket_size[k*NUM_BUCKETS+i-1];
-    }
-    ////////////////////////////////////
-    dash::barrier();
-    typedef dash::CSRPattern<1>           pattern_t;
-    typedef int                           index_t;
-  	typedef typename pattern_t::size_type extent_t;
-
-  	std::vector<extent_t> local_sizes;
-    dash::Array<int> my_elem_count(dash::size());
-    int local_buckets = ceil((double) NUM_BUCKETS / dash::size());
-
-    my_elem_count.local[0] = ((myid == num_procs - 1)? NUM_KEYS : bucket_ptrs[(myid + 1)*local_buckets]) - bucket_ptrs[(myid + 0)*local_buckets];
-
-    dash::barrier();
-
-    for (int unit_idx = 0; unit_idx < dash::size(); ++unit_idx) {
-      local_sizes.push_back(my_elem_count[unit_idx]);
+          bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i-1];
     }
 
-    dash::barrier();
-
-  	pattern_t pattern(local_sizes);
-
-  	dash::Array<INT_TYPE, index_t, pattern_t> key_buff2l(pattern);
-
-    ////////////////////////////////7
-  	dash::for_each(key_array.begin(), key_array.end(), [&shift, &bucket_ptrs, &key_buff2l](int k) {
-  		key_buff2l[bucket_ptrs.local[k >> shift]++] = k;
+  	dash::for_each(key_array.begin(), key_array.end(), [&shift, &bucket_ptrs_local](int k) {
+  		key_buff2[bucket_ptrs_local[k >> shift]++] = k;
   	});
   	key_array.barrier();
 
   	if (myid < num_procs-1) {
   		for( i=0; i< NUM_BUCKETS; i++ )
   			for( k=myid+1; k< num_procs; k++ )
-  				bucket_ptrs.local[i] += bucket_size[k*NUM_BUCKETS+i];
+  				bucket_ptrs_local[i] += bucket_size[k*NUM_BUCKETS+i];
   	}
 
 
@@ -626,11 +601,11 @@ void rank( int iteration )
 
   	//if( 0 == dash::myid()) std::iota(v.begin(), v.end(), 0);
 
-  	std::iota(v.lbegin(), v.lend(), dash::myid() * local_buckets); //only works when using blocking pattern
+  	std::iota(v.lbegin(), v.lend(), dash::myid() * ceil((double) NUM_BUCKETS / dash::size())); //only works when using blocking pattern
 
   	v.barrier();
 
-  	dash::for_each(v.begin(), v.end(), [&num_bucket_keys, &bucket_ptrs, &key_buff2l, &local_buckets, &myid](int i)	{
+  	dash::for_each(v.begin(), v.end(), [&num_bucket_keys, &bucket_ptrs_local](int i)	{
 
   		/*  Clear the work array section associated with each bucket */
   		INT_TYPE j;
@@ -640,14 +615,13 @@ void rank( int iteration )
   			key_buff1[j] = 0;
 
   		/*  Ranking of all keys occurs in this section:                 */
-      int key_buff2_offset = (myid > 0)? bucket_ptrs.local[myid*local_buckets-1] : 0;
 
   		/*  In this section, the keys themselves are used as their
   		own indexes to determine how many of each there are: their
   		individual population                                       */
-  		INT_TYPE m = (i > 0)? bucket_ptrs.local[i-1] : 0;
-  		for ( j = m - key_buff2_offset; j < bucket_ptrs.local[i] - key_buff2_offset; j++ )
-  			key_buff1[key_buff2l.local[j]]++;  /* Now they have individual key   */
+  		INT_TYPE m = (i > 0)? bucket_ptrs_local[i-1] : 0;
+  		for ( j = m; j < bucket_ptrs_local[i]; j++ )
+  			key_buff1[key_buff2[j]]++;  /* Now they have individual key   */
   																			/* population                     */
 
   			/*  To obtain ranks of each key, successively add the individual key
