@@ -36,18 +36,18 @@ CLINK	= $(CC)
 # These macros are passed to the linker
 #---------------------------------------------------------------------------
 #C_LIB  = -lm -ltbb
-C_LIB = -L/home/nicco/opt/dash-0.4.0/lib
+C_LIB = -L/home/pascal/opt/dash-0.3.0-dev/lib
 
 #---------------------------------------------------------------------------
 # These macros are passed to the compiler
 #---------------------------------------------------------------------------
 #C_INC = -I../common
-C_INC = -I../common -I/home/nicco/opt/dash-0.4.0/include
+C_INC = -I../common -I/home/pascal/opt/dash-0.3.0-dev/patterns/include -I/home/pascal/opt/dash-0.3.0-dev/include -I/home/pascal/src/mephisto/mephisto/include -I/home/pascal/src/mephisto/alpaka/include -I$(BOOST_ROOT)/include
 
 #---------------------------------------------------------------------------
 # Global *compile time* flags for C programs (use -w3 -diag-disable 981 -diag-disable 383)
 #---------------------------------------------------------------------------
-CFLAGS	= -std=c++14 -O3
+CFLAGS	= -std=c++14 -O0 -DALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED=1
 
 #---------------------------------------------------------------------------
 # Global *link time* flags. Flags for increasing maximum executable
